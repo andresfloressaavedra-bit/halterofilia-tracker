@@ -12,24 +12,12 @@ try:
 except ImportError:
     HAS_GENAI = False
 
-# Configuración visual
 st.set_page_config(page_title="Tracker Halterofilia Pro", page_icon="🏋️‍♂️", layout="wide")
 
-# Bloqueo del gesto "pull-to-refresh" en navegadores móviles táctiles
-st.markdown("""
-    <style>
-        html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
-            overscroll-behavior-y: contain !important;
-            overscroll-behavior-x: none !important;
-        }
-    </style>
-""", unsafe_allow_html=True)
-
-# Tu clave de Gemini AI Studio
-GEMINI_API_KEY = "AQ.Ab8RN6I8munB4uXzOxh6dzT90Z3UNZ7iNXG27jzq8V-toHW0lw"
+GEMINI_API_KEY = "TAQ.Ab8RN6I8munB4uXzOxh6dzT90Z3UNZ7iNXG27jzq8V-toHW0lw"
 
 # -------------------------------------------------------------
-# BASE DE DATOS (MIGRACIÓN AUTOMÁTICA)
+# BASE DE DATOS
 # -------------------------------------------------------------
 def get_db_connection():
     conn = sqlite3.connect("halterofilia.db", timeout=10)
@@ -39,8 +27,6 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
-    
-    # Crear tabla base si no existe
     c.execute("""
         CREATE TABLE IF NOT EXISTS intentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,25 +41,21 @@ def init_db():
             observacion TEXT
         )
     """)
-    
-    # Auto-reparar columnas faltantes en la nube
     c.execute("PRAGMA table_info(intentos)")
-    columnas_actuales = [col[1] for col in c.fetchall()]
+    columnas = [col[1] for col in c.fetchall()]
     
-    nuevas_columnas = {
+    nuevas = {
         "bloque_combo": "TEXT",
         "repeticion": "TEXT",
         "movimiento": "TEXT",
         "pct_pr": "REAL"
     }
-    
-    for col, tipo in nuevas_columnas.items():
-        if col not in columnas_actuales:
+    for col, t in nuevas.items():
+        if col not in columnas:
             try:
-                c.execute(f"ALTER TABLE intentos ADD COLUMN {col} {tipo}")
+                c.execute(f"ALTER TABLE intentos ADD COLUMN {col} {t}")
             except Exception:
                 pass
-                
     conn.commit()
     conn.close()
 
@@ -93,15 +75,15 @@ def procesar_pizarra_con_ia(image_file, api_key):
     Analiza esta foto de una pizarra de halterofilia. Extrae los ejercicios planificados.
     Para cada línea identifica:
     1. "Tipo": 'Arranque', 'Envión' o 'Fuerza'.
-    2. "Complejo / Ejercicios": El nombre del ejercicio o combo (separando movimientos con '+').
-    3. "Series": Número de series (ej. de 2x1 es 2).
-    4. "Reps": Número de repeticiones (ej. de 2x1 es 1).
-    5. "% 1RM": El porcentaje de 1RM como entero (ej. 80 para 80%).
+    2. "Complejo": El nombre del ejercicio o combo (separando movimientos con '+').
+    3. "Series": Número de series (ej. 2).
+    4. "Reps": Número de repeticiones (ej. 1).
+    5. "Pct": El porcentaje de 1RM como entero (ej. 80 para 80%).
 
-    Responde ÚNICAMENTE con un JSON válido estructurado como lista:
+    Responde ÚNICAMENTE con un JSON válido como este:
     [
-      {"Tipo": "Arranque", "Complejo / Ejercicios": "Jalón Arranque c/p rodilla + Arranque c/p rodilla + Clásico", "Series": 1, "Reps": 2, "% 1RM": 50},
-      {"Tipo": "Envión", "Complejo / Ejercicios": "Cargada c/p + Yerk", "Series": 2, "Reps": 1, "% 1RM": 85}
+      {"Tipo": "Arranque", "Complejo": "Jalón Arranque c/p rodilla + Arranque c/p rodilla + Clásico", "Series": 1, "Reps": 2, "Pct": 50},
+      {"Tipo": "Envión", "Complejo": "Cargada c/p + Yerk", "Series": 2, "Reps": 1, "Pct": 85}
     ]
     """
     response = model.generate_content([prompt, img])
@@ -136,11 +118,16 @@ if menu == "📷 Subir / Planificar Sesión":
         if st.button("🤖 Leer Pizarra Automáticamente"):
             with st.spinner("Analizando pizarra con IA..."):
                 try:
-                    datos_leidos = procesar_pizarra_con_ia(uploaded_img, GEMINI_API_KEY)
-                    st.session_state["pizarra_datos"] = pd.DataFrame(datos_leidos)
+                    datos = procesar_pizarra_con_ia(uploaded_img, GEMINI_API_KEY)
+                    df_temp = pd.DataFrame(datos)
+                    if "Complejo" in df_temp.columns:
+                        df_temp = df_temp.rename(columns={"Complejo": "Complejo / Ejercicios"})
+                    if "Pct" in df_temp.columns:
+                        df_temp = df_temp.rename(columns={"Pct": "% 1RM"})
+                    st.session_state["pizarra_datos"] = df_temp
                     st.success("¡Pizarra leída con éxito!")
                 except Exception as e:
-                    st.error(f"Error al procesar la imagen: {e}")
+                    st.error(f"Error al procesar: {e}")
 
     st.divider()
     st.subheader("2. Esquema de Entrenamiento")
@@ -154,10 +141,154 @@ if menu == "📷 Subir / Planificar Sesión":
             {"Tipo": "Arranque", "Complejo / Ejercicios": "Jalón c/p + Clásico", "Series": 2, "Reps": 1, "% 1RM": 85},
         ])
 
+    cfg_pizarra = {
+        "Tipo": st.column_config.SelectboxColumn("Tipo", options=["Arranque", "Envión", "Fuerza"], required=True),
+        "Series": st.column_config.NumberColumn("Series", min_value=1, max_value=10, default=1),
+        "Reps": st.column_config.NumberColumn("Reps", min_value=1, max_value=10, default=1),
+        "% 1RM": st.column_config.NumberColumn("% 1RM", min_value=10, max_value=120, default=70, format="%d%%")
+    }
+
     pizarra_editada = st.data_editor(
         st.session_state["pizarra_datos"],
         num_rows="dynamic",
         use_container_width=True,
-        column_config={
-            "Tipo": st.column_config.SelectboxColumn("Tipo", options=["Arranque", "Envión", "Fuerza"], required=True),
-            "Series": st.column_config.NumberColumn(min_value=1, max
+        column_config=cfg_pizarra
+    )
+
+    if st.button("⚡ Generar Matriz de Movimientos"):
+        filas = []
+        for _, row in pizarra_editada.iterrows():
+            tipo_mov = str(row["Tipo"])
+            pr_base = pr_arranque if tipo_mov == "Arranque" else pr_envion
+            complejo_str = str(row["Complejo / Ejercicios"])
+            movimientos = [m.strip() for m in complejo_str.split("+") if m.strip()]
+            series = int(row["Series"])
+            reps = int(row["Reps"])
+            pct = float(row["% 1RM"])
+            peso = round((pr_base * (pct / 100.0)) * 2) / 2
+            
+            for s in range(1, series + 1):
+                for r in range(1, reps + 1):
+                    for mov in movimientos:
+                        filas.append({
+                            "Tipo": tipo_mov,
+                            "Bloque": complejo_str,
+                            "Serie": f"S{s}",
+                            "Rep": f"Rep {r}",
+                            "Movimiento": mov,
+                            "Carga (kg)": peso,
+                            "% 1RM": f"{int(pct)}%",
+                            "Válido (✔)": True,
+                            "Observación Técnica": ""
+                        })
+        st.session_state["matriz_activa"] = pd.DataFrame(filas)
+
+    if "matriz_activa" in st.session_state:
+        st.divider()
+        st.subheader("3. Registro de Ejecución en Vivo")
+        
+        cfg_matriz = {
+            "Válido (✔)": st.column_config.CheckboxColumn("¿Válido?", default=True),
+            "Carga (kg)": st.column_config.NumberColumn("Peso (kg)", min_value=0.0, step=0.5),
+            "Observación Técnica": st.column_config.TextColumn("Observación", width="large")
+        }
+
+        matriz_final = st.data_editor(
+            st.session_state["matriz_activa"],
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config=cfg_matriz
+        )
+
+        if st.button("💾 Guardar Entrenamiento Completo"):
+            conn = get_db_connection()
+            c = conn.cursor()
+            for _, r in matriz_final.iterrows():
+                valido = bool(r["Válido (✔)"]) if pd.notna(r["Válido (✔)"]) else False
+                res = "Completado" if valido else "Falla"
+                pr_base = pr_arranque if r["Tipo"] == "Arranque" else pr_envion
+                obs = str(r["Observación Técnica"]) if pd.notna(r["Observación Técnica"]) else ""
+                
+                c.execute("""
+                    INSERT INTO intentos (fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    str(fecha_sel), str(r["Tipo"]), float(pr_base), str(r["Bloque"]),
+                    str(r["Serie"]), str(r["Rep"]), str(r["Movimiento"]),
+                    float(str(r["% 1RM"]).replace("%", "")),
+                    float(r["Carga (kg)"]), res, obs
+                ))
+            conn.commit()
+            conn.close()
+            st.success("¡Sesión guardada con éxito!")
+            del st.session_state["matriz_activa"]
+            st.rerun()
+
+# -------------------------------------------------------------
+# MÓDULO 2: DETALLE DIARIO
+# -------------------------------------------------------------
+elif menu == "🔍 Detalle Diario":
+    st.title("📋 Resumen Diario por Movimiento")
+    conn = get_db_connection()
+    df_raw = pd.read_sql_query("SELECT * FROM intentos", conn)
+    conn.close()
+
+    if df_raw.empty:
+        st.info("No hay entrenamientos guardados aún.")
+    else:
+        fechas = sorted(df_raw["fecha"].unique(), reverse=True)
+        fecha_sel = st.selectbox("Selecciona la fecha", fechas)
+        df_dia = df_raw[df_raw["fecha"] == fecha_sel]
+
+        tot_movs = len(df_dia)
+        tot_val = len(df_dia[df_dia["resultado"] == "Completado"])
+        tot_fal = len(df_dia[df_dia["resultado"] == "Falla"])
+        pct_efectividad = (tot_val / tot_movs * 100) if tot_movs > 0 else 0
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Efectividad Global", f"{pct_efectividad:.1f}%")
+        c2.metric("Válidos", tot_val)
+        c3.metric("Fallas", tot_fal)
+        c4.metric("Total Movimientos", tot_movs)
+
+        st.dataframe(
+            df_dia[["tipo_sesion", "serie", "repeticion", "movimiento", "peso", "pct_pr", "resultado", "observacion"]].rename(columns={
+                "tipo_sesion": "Tipo", "serie": "Serie", "repeticion": "Rep", "movimiento": "Movimiento",
+                "peso": "Peso (kg)", "pct_pr": "% 1RM", "resultado": "Resultado", "observacion": "Observación Técnica"
+            }),
+            use_container_width=True
+        )
+
+# -------------------------------------------------------------
+# MÓDULO 3: DASHBOARD SEMESTRAL
+# -------------------------------------------------------------
+elif menu == "📊 Dashboard Semestral":
+    st.title("📈 Progreso y Diagnóstico Semestral")
+    conn = get_db_connection()
+    df_all = pd.read_sql_query("SELECT * FROM intentos", conn)
+    conn.close()
+
+    if df_all.empty:
+        st.info("No hay datos suficientes para graficar.")
+    else:
+        df_all["fecha"] = pd.to_datetime(df_all["fecha"])
+        df_all["is_comp"] = df_all["resultado"] == "Completado"
+        df_all["is_falla"] = df_all["resultado"] == "Falla"
+
+        df_progreso = df_all.groupby(["fecha", "tipo_sesion"]).agg(
+            Válidos=("is_comp", "sum"),
+            Total=("id", "count")
+        ).reset_index()
+        df_progreso["% Efectividad"] = (df_progreso["Válidos"] / df_progreso["Total"]) * 100
+
+        fig_line = px.line(
+            df_progreso,
+            x="fecha",
+            y="% Efectividad",
+            color="tipo_sesion",
+            markers=True,
+            title="Curva de Efectividad Técnica Semestral: Arranque vs Envión",
+            labels={"fecha": "Fecha", "% Efectividad": "% Éxito", "tipo_sesion": "Levantamiento"}
+        )
+        fig_line.update_yaxes(range=[0, 105])
+        st.plotly_chart(fig_line, use_container_width=True)
