@@ -3,24 +3,46 @@ import pandas as pd
 import sqlite3
 import plotly.express as px
 from datetime import date
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Tracker Halterofilia Pro", page_icon="🏋️‍♂️", layout="wide")
 
 # -------------------------------------------------------------
-# CSS ANTI-RECARGA MÓVIL (EVITA REFRESH INVOLUNTARIO AL DESLIZAR)
+# BLOQUEO NATIVO DE RECARGA AL DESLIZAR (CSS + JAVASCRIPT TOUCH)
 # -------------------------------------------------------------
 st.markdown("""
     <style>
-        html, body, [data-testid="stAppViewContainer"] {
-            overscroll-behavior-y: contain !important;
-            overscroll-behavior-x: none !important;
+        html, body, [data-testid="stAppViewContainer"], .main, .block-container {
+            overscroll-behavior: none !important;
+            overscroll-behavior-y: none !important;
+            -webkit-overflow-scrolling: auto !important;
         }
         .main .block-container {
-            padding-top: 1.5rem;
-            padding-bottom: 3rem;
+            padding-top: 1rem;
+            padding-bottom: 4rem;
         }
     </style>
 """, unsafe_allow_html=True)
+
+# JavaScript inyectado para anular el Pull-to-Refresh del navegador móvil
+components.html("""
+<script>
+    (function() {
+        let touchStartY = 0;
+        window.addEventListener('touchstart', function(e) {
+            touchStartY = e.touches[0].clientY;
+        }, { passive: false });
+
+        window.addEventListener('touchmove', function(e) {
+            const touchY = e.touches[0].clientY;
+            const touchDiff = touchY - touchStartY;
+            if (window.scrollY === 0 && touchDiff > 0) {
+                e.preventDefault();
+            }
+        }, { passive: false });
+    })();
+</script>
+""", height=0, width=0)
 
 # -------------------------------------------------------------
 # BASE DE DATOS
@@ -44,24 +66,13 @@ def init_db():
             intento INTEGER,
             peso REAL,
             resultado TEXT,
-            observacion TEXT
+            observacion TEXT,
+            bloque_combo TEXT,
+            repeticion TEXT,
+            movimiento TEXT,
+            pct_pr REAL
         )
     """)
-    c.execute("PRAGMA table_info(intentos)")
-    columnas = [col[1] for col in c.fetchall()]
-    
-    nuevas = {
-        "bloque_combo": "TEXT",
-        "repeticion": "TEXT",
-        "movimiento": "TEXT",
-        "pct_pr": "REAL"
-    }
-    for col, t in nuevas.items():
-        if col not in columnas:
-            try:
-                c.execute(f"ALTER TABLE intentos ADD COLUMN {col} {t}")
-            except Exception:
-                pass
     conn.commit()
     conn.close()
 
@@ -87,7 +98,7 @@ if menu == "📝 Planificar y Entrenar":
 
     st.divider()
     st.subheader("1. Esquema de Series y Bloques")
-    st.caption("Configura tus ejercicios o combos separándolos con '+' (Ejemplo: *Jalón c/p + Clásico*). Puedes añadir o borrar filas directamente en la tabla.")
+    st.caption("Configura tus ejercicios separando combos con '+' (ej. *Jalón c/p + Clásico*).")
     
     if "pizarra_datos" not in st.session_state:
         st.session_state["pizarra_datos"] = pd.DataFrame([
@@ -106,13 +117,16 @@ if menu == "📝 Planificar y Entrenar":
         "% 1RM": st.column_config.NumberColumn("% 1RM", min_value=10, max_value=150, default=70, format="%d%%")
     }
 
+    # Data editor con sincronización directa
     pizarra_editada = st.data_editor(
         st.session_state["pizarra_datos"],
         num_rows="dynamic",
         use_container_width=True,
         column_config=cfg_pizarra,
-        key="editor_pizarra"
+        key="editor_pizarra_directo"
     )
+    # Persistir cambios de la tabla 1
+    st.session_state["pizarra_datos"] = pizarra_editada
 
     if st.button("⚡ Generar Matriz de Movimientos", type="primary", key="btn_generar_matriz"):
         filas = []
@@ -135,14 +149,14 @@ if menu == "📝 Planificar y Entrenar":
                             "Serie": f"S{s}",
                             "Rep": f"Rep {r}",
                             "Movimiento": mov,
-                            "Carga (kg)": peso,
+                            "Carga (kg)": float(peso),
                             "% 1RM": f"{int(pct)}%",
                             "Válido (✔)": True,
                             "Observación Técnica": ""
                         })
         st.session_state["matriz_activa"] = pd.DataFrame(filas)
 
-    if "matriz_activa" in st.session_state:
+    if "matriz_activa" in st.session_state and not st.session_state["matriz_activa"].empty:
         st.divider()
         st.subheader("2. Registro de Ejecución en Vivo")
         
@@ -163,8 +177,10 @@ if menu == "📝 Planificar y Entrenar":
             num_rows="fixed",
             use_container_width=True,
             column_config=cfg_matriz,
-            key="editor_matriz_final"
+            key="editor_matriz_directo"
         )
+        # Persistir cambios de la matriz en vivo
+        st.session_state["matriz_activa"] = matriz_final
 
         if st.button("💾 Guardar Entrenamiento Completo", type="primary", key="btn_guardar_todo"):
             conn = get_db_connection()
@@ -186,7 +202,7 @@ if menu == "📝 Planificar y Entrenar":
                 ))
             conn.commit()
             conn.close()
-            st.success("¡Sesión guardada con éxito!")
+            st.success("¡Sesión guardada con éxito en la base de datos!")
             del st.session_state["matriz_activa"]
             st.rerun()
 
@@ -202,7 +218,7 @@ elif menu == "🔍 Detalle Diario":
     if df_raw.empty:
         st.info("No hay entrenamientos guardados aún.")
     else:
-        fechas = sorted(df_raw["fecha"].unique(), reverse=True)
+        fechas = sorted(df_raw["fecha"].dropna().unique(), reverse=True)
         fecha_sel = st.selectbox("Selecciona la fecha", fechas, key="sel_fecha_detalle")
         df_dia = df_raw[df_raw["fecha"] == fecha_sel]
 
@@ -239,7 +255,6 @@ elif menu == "📊 Dashboard Semestral":
     else:
         df_all["fecha"] = pd.to_datetime(df_all["fecha"])
         df_all["is_comp"] = df_all["resultado"] == "Completado"
-        df_all["is_falla"] = df_all["resultado"] == "Falla"
 
         df_progreso = df_all.groupby(["fecha", "tipo_sesion"]).agg(
             Válidos=("is_comp", "sum"),
