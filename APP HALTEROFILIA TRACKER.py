@@ -2,15 +2,25 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import plotly.express as px
-import json
-import base64
-import requests
 from datetime import date
 
 st.set_page_config(page_title="Tracker Halterofilia Pro", page_icon="🏋️‍♂️", layout="wide")
 
-# Clave tomada de forma segura desde Streamlit Secrets
-GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+# -------------------------------------------------------------
+# CSS ANTI-RECARGA MÓVIL (EVITA REFRESH INVOLUNTARIO AL DESLIZAR)
+# -------------------------------------------------------------
+st.markdown("""
+    <style>
+        html, body, [data-testid="stAppViewContainer"] {
+            overscroll-behavior-y: contain !important;
+            overscroll-behavior-x: none !important;
+        }
+        .main .block-container {
+            padding-top: 1.5rem;
+            padding-bottom: 3rem;
+        }
+    </style>
+""", unsafe_allow_html=True)
 
 # -------------------------------------------------------------
 # BASE DE DATOS
@@ -57,96 +67,13 @@ def init_db():
 
 init_db()
 
-menu = st.sidebar.radio("Navegación", ["📷 Subir / Planificar Sesión", "🔍 Detalle Diario", "📊 Dashboard Semestral"])
+menu = st.sidebar.radio("Navegación", ["📝 Planificar y Entrenar", "🔍 Detalle Diario", "📊 Dashboard Semestral"])
 
 # -------------------------------------------------------------
-# OCR CON GEMINI (VÍA REST DIRECTO - COMPATIBLE CON AQ.)
+# MÓDULO 1: PLANIFICACIÓN Y ENTRENAMIENTO
 # -------------------------------------------------------------
-def procesar_pizarra_con_ia(image_file, api_key):
-    image_bytes = image_file.getvalue()
-    b64_image = base64.b64encode(image_bytes).decode("utf-8")
-    mime_type = image_file.type if hasattr(image_file, "type") and image_file.type else "image/jpeg"
-
-    prompt = """
-    Analiza esta foto de una pizarra de halterofilia. Extrae los ejercicios planificados.
-    Para cada ejercicio identifica:
-    - "Tipo": exactamente 'Arranque', 'Envión' o 'Fuerza'.
-    - "Complejo / Ejercicios": Nombre del combo (ej. 'Jalón Arranque + Arranque').
-    - "Series": Número entero de series (ej. 2).
-    - "Reps": Número entero de repeticiones (ej. 1).
-    - "% 1RM": Número entero del porcentaje (ej. 80).
-
-    IMPORTANTE: Responde ÚNICAMENTE con una lista JSON válida como esta:
-    [
-      {"Tipo": "Arranque", "Complejo / Ejercicios": "Jalón Arranque + Clásico", "Series": 2, "Reps": 1, "% 1RM": 80}
-    ]
-    """
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": api_key
-    }
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": prompt},
-                    {
-                        "inline_data": {
-                            "mime_type": mime_type,
-                            "data": b64_image
-                        }
-                    }
-                ]
-            }
-        ]
-    }
-
-    response = requests.post(url, headers=headers, json=payload, timeout=40)
-    if response.status_code != 200:
-        raise Exception(f"Error de Google ({response.status_code}): {response.text}")
-
-    result_json = response.json()
-    raw_text = result_json["candidates"][0]["content"]["parts"][0]["text"].strip()
-
-    if "```json" in raw_text:
-        raw_text = raw_text.split("```json")[1].split("```")[0].strip()
-    elif "```" in raw_text:
-        raw_text = raw_text.split("```")[1].split("```")[0].strip()
-
-    data = json.loads(raw_text)
-
-    if isinstance(data, dict):
-        for k in data:
-            if isinstance(data[k], list):
-                data = data[k]
-                break
-        if isinstance(data, dict):
-            data = [data]
-
-    resultado_limpio = []
-    for item in data:
-        if isinstance(item, dict):
-            tipo = item.get("Tipo", item.get("tipo", "Arranque"))
-            ejercicio = item.get("Complejo / Ejercicios", item.get("Complejo", item.get("ejercicio", "Ejercicio")))
-            series = int(item.get("Series", item.get("series", 1)))
-            reps = int(item.get("Reps", item.get("reps", item.get("repeticiones", 1))))
-            pct = float(item.get("% 1RM", item.get("pct", item.get("porcentaje", 70))))
-            resultado_limpio.append({
-                "Tipo": tipo if tipo in ["Arranque", "Envión", "Fuerza"] else "Arranque",
-                "Complejo / Ejercicios": str(ejercicio),
-                "Series": series,
-                "Reps": reps,
-                "% 1RM": pct
-            })
-    return resultado_limpio
-
-# -------------------------------------------------------------
-# MÓDULO 1: SUBIDA Y PLANIFICACIÓN
-# -------------------------------------------------------------
-if menu == "📷 Subir / Planificar Sesión":
-    st.title("🏋️‍♂️ Planificación de Sesión (Arranque / Envión)")
+if menu == "📝 Planificar y Entrenar":
+    st.title("🏋️‍♂️ Sesión de Entrenamiento")
     
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -159,21 +86,8 @@ if menu == "📷 Subir / Planificar Sesión":
         pr_envion = st.number_input("PR Envión (kg)", min_value=1.0, value=90.0, step=2.5, key="pr_env")
 
     st.divider()
-    st.subheader("1. Cargar desde Foto de Pizarra (Opcional)")
-    uploaded_img = st.file_uploader("Subir foto de la pizarra", type=["png", "jpg", "jpeg"], key="pizarra_uploader")
-
-    if uploaded_img and GEMINI_API_KEY:
-        if st.button("🤖 Leer Pizarra Automáticamente", key="btn_leer_ia"):
-            with st.spinner("Analizando pizarra con IA..."):
-                try:
-                    datos = procesar_pizarra_con_ia(uploaded_img, GEMINI_API_KEY)
-                    st.session_state["pizarra_datos"] = pd.DataFrame(datos)
-                    st.success("¡Pizarra leída con éxito!")
-                except Exception as e:
-                    st.error(f"Error al procesar la imagen: {e}")
-
-    st.divider()
-    st.subheader("2. Esquema de Entrenamiento")
+    st.subheader("1. Esquema de Series y Bloques")
+    st.caption("Configura tus ejercicios o combos separándolos con '+' (Ejemplo: *Jalón c/p + Clásico*). Puedes añadir o borrar filas directamente en la tabla.")
     
     if "pizarra_datos" not in st.session_state:
         st.session_state["pizarra_datos"] = pd.DataFrame([
@@ -186,9 +100,10 @@ if menu == "📷 Subir / Planificar Sesión":
 
     cfg_pizarra = {
         "Tipo": st.column_config.SelectboxColumn("Tipo", options=["Arranque", "Envión", "Fuerza"], required=True),
-        "Series": st.column_config.NumberColumn("Series", min_value=1, max_value=10, default=1),
-        "Reps": st.column_config.NumberColumn("Reps", min_value=1, max_value=10, default=1),
-        "% 1RM": st.column_config.NumberColumn("% 1RM", min_value=10, max_value=120, default=70, format="%d%%")
+        "Complejo / Ejercicios": st.column_config.TextColumn("Complejo / Ejercicios", width="large", required=True),
+        "Series": st.column_config.NumberColumn("Series", min_value=1, max_value=20, default=1),
+        "Reps": st.column_config.NumberColumn("Reps", min_value=1, max_value=20, default=1),
+        "% 1RM": st.column_config.NumberColumn("% 1RM", min_value=10, max_value=150, default=70, format="%d%%")
     }
 
     pizarra_editada = st.data_editor(
@@ -199,7 +114,7 @@ if menu == "📷 Subir / Planificar Sesión":
         key="editor_pizarra"
     )
 
-    if st.button("⚡ Generar Matriz de Movimientos", key="btn_generar_matriz"):
+    if st.button("⚡ Generar Matriz de Movimientos", type="primary", key="btn_generar_matriz"):
         filas = []
         for _, row in pizarra_editada.iterrows():
             tipo_mov = str(row["Tipo"])
@@ -229,23 +144,29 @@ if menu == "📷 Subir / Planificar Sesión":
 
     if "matriz_activa" in st.session_state:
         st.divider()
-        st.subheader("3. Registro de Ejecución en Vivo")
+        st.subheader("2. Registro de Ejecución en Vivo")
         
         cfg_matriz = {
+            "Tipo": st.column_config.TextColumn("Tipo", disabled=True),
+            "Bloque": st.column_config.TextColumn("Bloque", disabled=True),
+            "Serie": st.column_config.TextColumn("Serie", disabled=True),
+            "Rep": st.column_config.TextColumn("Rep", disabled=True),
+            "Movimiento": st.column_config.TextColumn("Movimiento", disabled=True),
             "Válido (✔)": st.column_config.CheckboxColumn("¿Válido?", default=True),
             "Carga (kg)": st.column_config.NumberColumn("Peso (kg)", min_value=0.0, step=0.5),
-            "Observación Técnica": st.column_config.TextColumn("Observación", width="large")
+            "% 1RM": st.column_config.TextColumn("% 1RM", disabled=True),
+            "Observación Técnica": st.column_config.TextColumn("Observación Técnica", width="large")
         }
 
         matriz_final = st.data_editor(
             st.session_state["matriz_activa"],
-            num_rows="dynamic",
+            num_rows="fixed",
             use_container_width=True,
             column_config=cfg_matriz,
             key="editor_matriz_final"
         )
 
-        if st.button("💾 Guardar Entrenamiento Completo", key="btn_guardar_todo"):
+        if st.button("💾 Guardar Entrenamiento Completo", type="primary", key="btn_guardar_todo"):
             conn = get_db_connection()
             c = conn.cursor()
             for _, r in matriz_final.iterrows():
