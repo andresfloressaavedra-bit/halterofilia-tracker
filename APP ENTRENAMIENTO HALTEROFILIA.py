@@ -1,11 +1,10 @@
 import streamlit as st
 import pandas as pd
+import sqlite3
 import plotly.express as px
 from PIL import Image
 import json
 from datetime import date
-from io import BytesIO
-from streamlit_gsheets import GSheetsConnection
 
 try:
     import google.generativeai as genai
@@ -13,43 +12,64 @@ try:
 except ImportError:
     HAS_GENAI = False
 
+# Configuración visual
 st.set_page_config(page_title="Tracker Halterofilia Pro", page_icon="🏋️‍♂️", layout="wide")
-# Desactivar 'pull-to-refresh' (recarga accidental al deslizar en móviles)
-st.markdown("""
-    <style>
-        html, body, [data-testid="stAppViewContainer"] {
-            overscroll-behavior-y: contain !important;
-            overscroll-behavior-x: none !important;
-        }
-        .main {
-            overscroll-behavior: contain !important;
-        }
-    </style>
-""", unsafe_allow_html=True)
-# API Key de Gemini
-GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+
+# Tu clave de Gemini AI Studio
+GEMINI_API_KEY = "TU_API_KEY_AQUI"
+
 # -------------------------------------------------------------
-# CONEXIÓN CON GOOGLE SHEETS
+# BASE DE DATOS (MIGRACIÓN AUTOMÁTICA)
 # -------------------------------------------------------------
-conn = st.connection("gsheets", type=GSheetsConnection)
+def get_db_connection():
+    conn = sqlite3.connect("halterofilia.db", timeout=10)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-def cargar_datos():
-    try:
-        df = conn.read(ttl=0)
-        df = df.dropna(how="all")
-        return df
-    except Exception:
-        return pd.DataFrame(columns=[
-            "fecha", "tipo_sesion", "pr_base", "bloque_combo", "serie", 
-            "repeticion", "movimiento", "pct_pr", "peso", "resultado", "observacion"
-        ])
+def init_db():
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    # 1. Crear tabla base si no existe
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS intentos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT,
+            tipo_sesion TEXT,
+            pr_base REAL,
+            ejercicio TEXT,
+            serie TEXT,
+            intento INTEGER,
+            peso REAL,
+            resultado TEXT,
+            observacion TEXT
+        )
+    """)
+    
+    # 2. Auto-reparar columnas faltantes en la nube
+    c.execute("PRAGMA table_info(intentos)")
+    columnas_actuales = [col[1] for col in c.fetchall()]
+    
+    nuevas_columnas = {
+        "bloque_combo": "TEXT",
+        "repeticion": "TEXT",
+        "movimiento": "TEXT",
+        "pct_pr": "REAL"
+    }
+    
+    for col, tipo in nuevas_columnas.items():
+        if col not in columnas_actuales:
+            try:
+                c.execute(f"ALTER TABLE intentos ADD COLUMN {col} {tipo}")
+            except Exception:
+                pass
+                
+    conn.commit()
+    conn.close()
 
-def guardar_datos(df_nuevos):
-    df_existente = cargar_datos()
-    df_final = pd.concat([df_existente, df_nuevos], ignore_index=True)
-    conn.update(data=df_final)
+init_db()
 
-menu = st.sidebar.radio("Navegación", ["📷 Subir / Planificar Sesión", "🔍 Detalle Diario", "📊 Dashboard Semestral", "📥 Exportar / Respaldo"])
+menu = st.sidebar.radio("Navegación", ["📷 Subir / Planificar Sesión", "🔍 Detalle Diario", "📊 Dashboard Semestral"])
 
 # -------------------------------------------------------------
 # OCR CON GEMINI
@@ -63,10 +83,10 @@ def procesar_pizarra_con_ia(image_file, api_key):
     Analiza esta foto de una pizarra de halterofilia. Extrae los ejercicios planificados.
     Para cada línea identifica:
     1. "Tipo": 'Arranque', 'Envión' o 'Fuerza'.
-    2. "Complejo / Ejercicios": Nombre del combo (separando movimientos con '+').
-    3. "Series": Número de series.
-    4. "Reps": Número de repeticiones.
-    5. "% 1RM": El porcentaje de 1RM como entero.
+    2. "Complejo / Ejercicios": El nombre del ejercicio o combo (separando movimientos con '+').
+    3. "Series": Número de series (ej. de 2x1 es 2).
+    4. "Reps": Número de repeticiones (ej. de 2x1 es 1).
+    5. "% 1RM": El porcentaje de 1RM como entero (ej. 80 para 80%).
 
     Responde ÚNICAMENTE con un JSON válido estructurado como lista:
     [
@@ -179,41 +199,44 @@ if menu == "📷 Subir / Planificar Sesión":
         )
 
         if st.button("💾 Guardar Entrenamiento Completo"):
-            filas_para_db = []
+            conn = get_db_connection()
+            c = conn.cursor()
             for _, r in matriz_final.iterrows():
-                res = "Completado" if r["Válido (✔)"] else "Falla"
+                es_valido = bool(r["Válido (✔)"]) if pd.notna(r["Válido (✔)"]) else False
+                res = "Completado" if es_valido else "Falla"
                 pr_guardado = pr_arranque if r["Tipo"] == "Arranque" else pr_envion
-                filas_para_db.append({
-                    "fecha": str(fecha_sel),
-                    "tipo_sesion": r["Tipo"],
-                    "pr_base": pr_guardado,
-                    "bloque_combo": r["Bloque"],
-                    "serie": r["Serie"],
-                    "repeticion": r["Rep"],
-                    "movimiento": r["Movimiento"],
-                    "pct_pr": float(str(r["% 1RM"]).replace("%", "")),
-                    "peso": float(r["Carga (kg)"]),
-                    "resultado": res,
-                    "observacion": str(r["Observación Técnica"])
-                })
-            df_guardar = pd.DataFrame(filas_para_db)
-            guardar_datos(df_guardar)
-            st.success("¡Sesión guardada permanentemente en tu Google Drive!")
+                obs_limpia = str(r["Observación Técnica"]) if pd.notna(r["Observación Técnica"]) else ""
+                
+                c.execute("""
+                    INSERT INTO intentos (fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    str(fecha_sel), str(r["Tipo"]), float(pr_guardado), str(r["Bloque"]),
+                    str(r["Serie"]), str(r["Rep"]), str(r["Movimiento"]),
+                    float(str(r["% 1RM"]).replace("%", "")),
+                    float(r["Carga (kg)"]), res, obs_limpia
+                ))
+            conn.commit()
+            conn.close()
+            st.success("¡Sesión guardada con éxito!")
             del st.session_state["matriz_activa"]
+            st.rerun()
 
 # -------------------------------------------------------------
 # MÓDULO 2: DETALLE DIARIO
 # -------------------------------------------------------------
 elif menu == "🔍 Detalle Diario":
     st.title("📋 Resumen Diario por Movimiento")
-    df_raw = cargar_datos()
+    conn = get_db_connection()
+    df_raw = pd.read_sql_query("SELECT * FROM intentos", conn)
+    conn.close()
 
     if df_raw.empty:
-        st.info("No hay entrenamientos registrados aún.")
+        st.info("No hay entrenamientos guardados aún.")
     else:
-        fechas = sorted(df_raw["fecha"].astype(str).unique(), reverse=True)
+        fechas = sorted(df_raw["fecha"].unique(), reverse=True)
         fecha_sel = st.selectbox("Selecciona la fecha", fechas)
-        df_dia = df_raw[df_raw["fecha"].astype(str) == fecha_sel]
+        df_dia = df_raw[df_raw["fecha"] == fecha_sel]
 
         tot_movs = len(df_dia)
         tot_val = len(df_dia[df_dia["resultado"] == "Completado"])
@@ -239,10 +262,12 @@ elif menu == "🔍 Detalle Diario":
 # -------------------------------------------------------------
 elif menu == "📊 Dashboard Semestral":
     st.title("📈 Progreso y Diagnóstico Semestral")
-    df_all = cargar_datos()
+    conn = get_db_connection()
+    df_all = pd.read_sql_query("SELECT * FROM intentos", conn)
+    conn.close()
 
-    if df_all.empty or len(df_all) < 2:
-        st.info("Registra más entrenamientos para ver gráficos estadísticos.")
+    if df_all.empty:
+        st.info("No hay datos suficientes para graficar.")
     else:
         df_all["fecha"] = pd.to_datetime(df_all["fecha"])
         df_all["is_comp"] = df_all["resultado"] == "Completado"
@@ -250,36 +275,18 @@ elif menu == "📊 Dashboard Semestral":
 
         df_progreso = df_all.groupby(["fecha", "tipo_sesion"]).agg(
             Válidos=("is_comp", "sum"),
-            Total=("tipo_sesion", "count")
+            Total=("id", "count")
         ).reset_index()
         df_progreso["% Efectividad"] = (df_progreso["Válidos"] / df_progreso["Total"]) * 100
 
         fig_line = px.line(
-            df_progreso, x="fecha", y="% Efectividad", color="tipo_sesion", markers=True,
+            df_progreso,
+            x="fecha",
+            y="% Efectividad",
+            color="tipo_sesion",
+            markers=True,
             title="Curva de Efectividad Técnica Semestral: Arranque vs Envión",
             labels={"fecha": "Fecha", "% Efectividad": "% Éxito", "tipo_sesion": "Levantamiento"}
         )
         fig_line.update_yaxes(range=[0, 105])
         st.plotly_chart(fig_line, use_container_width=True)
-
-# -------------------------------------------------------------
-# MÓDULO 4: EXPORTAR / RESPALDO EXCEL
-# -------------------------------------------------------------
-elif menu == "📥 Exportar / Respaldo":
-    st.title("📥 Descargar Historial Completo")
-    df_respaldo = cargar_datos()
-
-    if df_respaldo.empty:
-        st.info("No hay datos para exportar.")
-    else:
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_respaldo.to_excel(writer, index=False, sheet_name='Entrenamientos')
-        excel_data = output.getvalue()
-
-        st.download_button(
-            label="📊 Descargar Base de Datos Completa en Excel (.xlsx)",
-            data=excel_data,
-            file_name=f"halterofilia_respaldo_{date.today()}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
