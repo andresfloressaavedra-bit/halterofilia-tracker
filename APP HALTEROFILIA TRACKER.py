@@ -114,15 +114,14 @@ if menu == "⚙️ 1. Esquema y PRs":
     col_a, col_b = st.columns(2)
     with col_a:
         st.session_state["cfg_fecha"] = st.date_input("Fecha", st.session_state.get("cfg_fecha", date.today()))
-        st.session_state["cfg_pr_arr"] = st.number_input("PR Arranque (kg)", min_value=1.0, value=float(st.session_state.get("cfg_pr_arr", 70.0)), step=2.5)
+        st.session_state["cfg_pr_arr"] = st.number_input("PR Arranque (kg)", min_value=1.0, value=float(st.session_state.get("cfg_pr_arr", 70.0)), step=1.0)
     with col_b:
         st.session_state["cfg_enfoque"] = st.selectbox("Enfoque General", ["Arranque + Envión", "Arranque", "Envión", "Fuerza"], index=0)
-        st.session_state["cfg_pr_env"] = st.number_input("PR Envión (kg)", min_value=1.0, value=float(st.session_state.get("cfg_pr_env", 90.0)), step=2.5)
+        st.session_state["cfg_pr_env"] = st.number_input("PR Envión (kg)", min_value=1.0, value=float(st.session_state.get("cfg_pr_env", 90.0)), step=1.0)
 
     st.divider()
     st.subheader("➕ Agregar Ejercicio o Bloque")
     
-    # Formulario protegido (No parpadea ni borra nada mientras escribes)
     with st.form("form_nuevo_bloque", clear_on_submit=True):
         f_tipo = st.selectbox("Tipo de Movimiento", ["Arranque", "Envión", "Fuerza"])
         f_ejercicio = st.text_input("Complejo o Ejercicios (separa combos con '+')", placeholder="Ej: Jalón c/p + Clásico")
