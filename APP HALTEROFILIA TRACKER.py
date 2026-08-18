@@ -2,20 +2,15 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import plotly.express as px
-from PIL import Image
 import json
+import base64
+import requests
 from datetime import date
-
-try:
-    import google.generativeai as genai
-    HAS_GENAI = True
-except ImportError:
-    HAS_GENAI = False
 
 st.set_page_config(page_title="Tracker Halterofilia Pro", page_icon="🏋️‍♂️", layout="wide")
 
-# TU API KEY DE GEMINI
-GEMINI_API_KEY = "AQ.Ab8RN6J34-hPjlTscx_eYVUIrkZTyQ7Wjzrr1oofSaEwriqZFw"
+# Clave tomada de forma segura desde Streamlit Secrets
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
 # -------------------------------------------------------------
 # BASE DE DATOS
@@ -65,13 +60,13 @@ init_db()
 menu = st.sidebar.radio("Navegación", ["📷 Subir / Planificar Sesión", "🔍 Detalle Diario", "📊 Dashboard Semestral"])
 
 # -------------------------------------------------------------
-# OCR CON GEMINI (PROTEGIDO)
+# OCR CON GEMINI (VÍA REST DIRECTO - COMPATIBLE CON AQ.)
 # -------------------------------------------------------------
 def procesar_pizarra_con_ia(image_file, api_key):
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    img = Image.open(image_file)
-    
+    image_bytes = image_file.getvalue()
+    b64_image = base64.b64encode(image_bytes).decode("utf-8")
+    mime_type = image_file.type if hasattr(image_file, "type") and image_file.type else "image/jpeg"
+
     prompt = """
     Analiza esta foto de una pizarra de halterofilia. Extrae los ejercicios planificados.
     Para cada ejercicio identifica:
@@ -86,17 +81,42 @@ def procesar_pizarra_con_ia(image_file, api_key):
       {"Tipo": "Arranque", "Complejo / Ejercicios": "Jalón Arranque + Clásico", "Series": 2, "Reps": 1, "% 1RM": 80}
     ]
     """
-    response = model.generate_content([prompt, img])
-    raw_text = response.text.strip()
-    
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": api_key
+    }
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": mime_type,
+                            "data": b64_image
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+    response = requests.post(url, headers=headers, json=payload, timeout=40)
+    if response.status_code != 200:
+        raise Exception(f"Error de Google ({response.status_code}): {response.text}")
+
+    result_json = response.json()
+    raw_text = result_json["candidates"][0]["content"]["parts"][0]["text"].strip()
+
     if "```json" in raw_text:
         raw_text = raw_text.split("```json")[1].split("```")[0].strip()
     elif "```" in raw_text:
         raw_text = raw_text.split("```")[1].split("```")[0].strip()
-        
+
     data = json.loads(raw_text)
-    
-    # Si devuelve un diccionario con una llave interna (ej. {"ejercicios": [...]})
+
     if isinstance(data, dict):
         for k in data:
             if isinstance(data[k], list):
@@ -104,8 +124,7 @@ def procesar_pizarra_con_ia(image_file, api_key):
                 break
         if isinstance(data, dict):
             data = [data]
-            
-    # Estandarizar nombres de columnas
+
     resultado_limpio = []
     for item in data:
         if isinstance(item, dict):
@@ -143,7 +162,7 @@ if menu == "📷 Subir / Planificar Sesión":
     st.subheader("1. Cargar desde Foto de Pizarra (Opcional)")
     uploaded_img = st.file_uploader("Subir foto de la pizarra", type=["png", "jpg", "jpeg"], key="pizarra_uploader")
 
-    if uploaded_img and GEMINI_API_KEY and GEMINI_API_KEY != "TU_API_KEY_AQUI" and HAS_GENAI:
+    if uploaded_img and GEMINI_API_KEY:
         if st.button("🤖 Leer Pizarra Automáticamente", key="btn_leer_ia"):
             with st.spinner("Analizando pizarra con IA..."):
                 try:
