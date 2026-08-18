@@ -14,10 +14,20 @@ except ImportError:
     HAS_GENAI = False
 
 st.set_page_config(page_title="Tracker Halterofilia Pro", page_icon="🏋️‍♂️", layout="wide")
-
+# Desactivar 'pull-to-refresh' (recarga accidental al deslizar en móviles)
+st.markdown("""
+    <style>
+        html, body, [data-testid="stAppViewContainer"] {
+            overscroll-behavior-y: contain !important;
+            overscroll-behavior-x: none !important;
+        }
+        .main {
+            overscroll-behavior: contain !important;
+        }
+    </style>
+""", unsafe_allow_html=True)
 # API Key de Gemini
-GEMINI_API_KEY = "TU_API_KEY_AQUI"
-
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 # -------------------------------------------------------------
 # CONEXIÓN CON GOOGLE SHEETS
 # -------------------------------------------------------------
