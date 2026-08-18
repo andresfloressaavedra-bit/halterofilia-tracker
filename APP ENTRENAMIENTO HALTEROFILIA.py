@@ -26,7 +26,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Tu clave de Gemini AI Studio
-GEMINI_API_KEY = "TU_API_KEY_AQUI"
+GEMINI_API_KEY = "AQ.Ab8RN6I8munB4uXzOxh6dzT90Z3UNZ7iNXG27jzq8V-toHW0lw"
 
 # -------------------------------------------------------------
 # BASE DE DATOS (MIGRACIÓN AUTOMÁTICA)
