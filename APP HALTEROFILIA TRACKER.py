@@ -15,7 +15,7 @@ except ImportError:
 st.set_page_config(page_title="Tracker Halterofilia Pro", page_icon="🏋️‍♂️", layout="wide")
 
 # TU API KEY DE GEMINI
-GEMINI_API_KEY = "AQ.Ab8RN6I8munB4uXzOxh6dzT90Z3UNZ7iNXG27jzq8V-toHW0lw"
+GEMINI_API_KEY = "AQ.Ab8RN6J34-hPjlTscx_eYVUIrkZTyQ7Wjzrr1oofSaEwriqZFw"
 
 # -------------------------------------------------------------
 # BASE DE DATOS
