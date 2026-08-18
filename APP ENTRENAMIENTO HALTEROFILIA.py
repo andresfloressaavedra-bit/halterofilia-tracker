@@ -1,10 +1,11 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
 import plotly.express as px
 from PIL import Image
 import json
 from datetime import date
+from io import BytesIO
+from streamlit_gsheets import GSheetsConnection
 
 try:
     import google.generativeai as genai
@@ -12,45 +13,33 @@ try:
 except ImportError:
     HAS_GENAI = False
 
-# Configuración visual
 st.set_page_config(page_title="Tracker Halterofilia Pro", page_icon="🏋️‍♂️", layout="wide")
 
-# Tu API Key de Google AI Studio
+# API Key de Gemini
 GEMINI_API_KEY = "TU_API_KEY_AQUI"
 
 # -------------------------------------------------------------
-# BASE DE DATOS
+# CONEXIÓN CON GOOGLE SHEETS
 # -------------------------------------------------------------
-def get_db_connection():
-    conn = sqlite3.connect("halterofilia.db")
-    conn.row_factory = sqlite3.Row
-    return conn
+conn = st.connection("gsheets", type=GSheetsConnection)
 
-def init_db():
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS intentos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            fecha TEXT,
-            tipo_sesion TEXT,
-            pr_base REAL,
-            bloque_combo TEXT,
-            serie TEXT,
-            repeticion TEXT,
-            movimiento TEXT,
-            pct_pr REAL,
-            peso REAL,
-            resultado TEXT,
-            observacion TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+def cargar_datos():
+    try:
+        df = conn.read(ttl=0)
+        df = df.dropna(how="all")
+        return df
+    except Exception:
+        return pd.DataFrame(columns=[
+            "fecha", "tipo_sesion", "pr_base", "bloque_combo", "serie", 
+            "repeticion", "movimiento", "pct_pr", "peso", "resultado", "observacion"
+        ])
 
-init_db()
+def guardar_datos(df_nuevos):
+    df_existente = cargar_datos()
+    df_final = pd.concat([df_existente, df_nuevos], ignore_index=True)
+    conn.update(data=df_final)
 
-menu = st.sidebar.radio("Navegación", ["📷 Subir / Planificar Sesión", "🔍 Detalle Diario", "📊 Dashboard Semestral"])
+menu = st.sidebar.radio("Navegación", ["📷 Subir / Planificar Sesión", "🔍 Detalle Diario", "📊 Dashboard Semestral", "📥 Exportar / Respaldo"])
 
 # -------------------------------------------------------------
 # OCR CON GEMINI
@@ -64,10 +53,10 @@ def procesar_pizarra_con_ia(image_file, api_key):
     Analiza esta foto de una pizarra de halterofilia. Extrae los ejercicios planificados.
     Para cada línea identifica:
     1. "Tipo": 'Arranque', 'Envión' o 'Fuerza'.
-    2. "Complejo / Ejercicios": El nombre del ejercicio o combo (separando movimientos con '+').
-    3. "Series": Número de series (ej. de 2x1 es 2).
-    4. "Reps": Número de repeticiones (ej. de 2x1 es 1).
-    5. "% 1RM": El porcentaje de 1RM como entero (ej. 80 para 80%).
+    2. "Complejo / Ejercicios": Nombre del combo (separando movimientos con '+').
+    3. "Series": Número de series.
+    4. "Reps": Número de repeticiones.
+    5. "% 1RM": El porcentaje de 1RM como entero.
 
     Responde ÚNICAMENTE con un JSON válido estructurado como lista:
     [
@@ -180,23 +169,26 @@ if menu == "📷 Subir / Planificar Sesión":
         )
 
         if st.button("💾 Guardar Entrenamiento Completo"):
-            conn = get_db_connection()
-            c = conn.cursor()
+            filas_para_db = []
             for _, r in matriz_final.iterrows():
                 res = "Completado" if r["Válido (✔)"] else "Falla"
                 pr_guardado = pr_arranque if r["Tipo"] == "Arranque" else pr_envion
-                c.execute("""
-                    INSERT INTO intentos (fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    str(fecha_sel), r["Tipo"], pr_guardado, r["Bloque"],
-                    r["Serie"], r["Rep"], r["Movimiento"],
-                    float(str(r["% 1RM"]).replace("%", "")),
-                    float(r["Carga (kg)"]), res, str(r["Observación Técnica"])
-                ))
-            conn.commit()
-            conn.close()
-            st.success("¡Sesión guardada con éxito!")
+                filas_para_db.append({
+                    "fecha": str(fecha_sel),
+                    "tipo_sesion": r["Tipo"],
+                    "pr_base": pr_guardado,
+                    "bloque_combo": r["Bloque"],
+                    "serie": r["Serie"],
+                    "repeticion": r["Rep"],
+                    "movimiento": r["Movimiento"],
+                    "pct_pr": float(str(r["% 1RM"]).replace("%", "")),
+                    "peso": float(r["Carga (kg)"]),
+                    "resultado": res,
+                    "observacion": str(r["Observación Técnica"])
+                })
+            df_guardar = pd.DataFrame(filas_para_db)
+            guardar_datos(df_guardar)
+            st.success("¡Sesión guardada permanentemente en tu Google Drive!")
             del st.session_state["matriz_activa"]
 
 # -------------------------------------------------------------
@@ -204,16 +196,14 @@ if menu == "📷 Subir / Planificar Sesión":
 # -------------------------------------------------------------
 elif menu == "🔍 Detalle Diario":
     st.title("📋 Resumen Diario por Movimiento")
-    conn = get_db_connection()
-    df_raw = pd.read_sql_query("SELECT * FROM intentos", conn)
-    conn.close()
+    df_raw = cargar_datos()
 
     if df_raw.empty:
-        st.info("No hay entrenamientos guardados aún.")
+        st.info("No hay entrenamientos registrados aún.")
     else:
-        fechas = sorted(df_raw["fecha"].unique(), reverse=True)
+        fechas = sorted(df_raw["fecha"].astype(str).unique(), reverse=True)
         fecha_sel = st.selectbox("Selecciona la fecha", fechas)
-        df_dia = df_raw[df_raw["fecha"] == fecha_sel]
+        df_dia = df_raw[df_raw["fecha"].astype(str) == fecha_sel]
 
         tot_movs = len(df_dia)
         tot_val = len(df_dia[df_dia["resultado"] == "Completado"])
@@ -239,12 +229,10 @@ elif menu == "🔍 Detalle Diario":
 # -------------------------------------------------------------
 elif menu == "📊 Dashboard Semestral":
     st.title("📈 Progreso y Diagnóstico Semestral")
-    conn = get_db_connection()
-    df_all = pd.read_sql_query("SELECT * FROM intentos", conn)
-    conn.close()
+    df_all = cargar_datos()
 
-    if df_all.empty:
-        st.info("No hay datos suficientes para graficar.")
+    if df_all.empty or len(df_all) < 2:
+        st.info("Registra más entrenamientos para ver gráficos estadísticos.")
     else:
         df_all["fecha"] = pd.to_datetime(df_all["fecha"])
         df_all["is_comp"] = df_all["resultado"] == "Completado"
@@ -252,18 +240,36 @@ elif menu == "📊 Dashboard Semestral":
 
         df_progreso = df_all.groupby(["fecha", "tipo_sesion"]).agg(
             Válidos=("is_comp", "sum"),
-            Total=("id", "count")
+            Total=("tipo_sesion", "count")
         ).reset_index()
         df_progreso["% Efectividad"] = (df_progreso["Válidos"] / df_progreso["Total"]) * 100
 
         fig_line = px.line(
-            df_progreso,
-            x="fecha",
-            y="% Efectividad",
-            color="tipo_sesion",
-            markers=True,
+            df_progreso, x="fecha", y="% Efectividad", color="tipo_sesion", markers=True,
             title="Curva de Efectividad Técnica Semestral: Arranque vs Envión",
             labels={"fecha": "Fecha", "% Efectividad": "% Éxito", "tipo_sesion": "Levantamiento"}
         )
         fig_line.update_yaxes(range=[0, 105])
         st.plotly_chart(fig_line, use_container_width=True)
+
+# -------------------------------------------------------------
+# MÓDULO 4: EXPORTAR / RESPALDO EXCEL
+# -------------------------------------------------------------
+elif menu == "📥 Exportar / Respaldo":
+    st.title("📥 Descargar Historial Completo")
+    df_respaldo = cargar_datos()
+
+    if df_respaldo.empty:
+        st.info("No hay datos para exportar.")
+    else:
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_respaldo.to_excel(writer, index=False, sheet_name='Entrenamientos')
+        excel_data = output.getvalue()
+
+        st.download_button(
+            label="📊 Descargar Base de Datos Completa en Excel (.xlsx)",
+            data=excel_data,
+            file_name=f"halterofilia_respaldo_{date.today()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
