@@ -3,7 +3,6 @@ import pandas as pd
 import sqlite3
 import plotly.express as px
 from datetime import date
-import streamlit.components.v1 as components
 
 st.set_page_config(
     page_title="Tracker Halterofilia Pro", 
@@ -12,7 +11,7 @@ st.set_page_config(
 )
 
 # -------------------------------------------------------------
-# BLOQUEO NATIVO DE RECARGA AL DESLIZAR (ANTI PULL-TO-REFRESH)
+# ESTILOS PARA EVITAR SALTOS DE PANTALLA EN MÓVIL
 # -------------------------------------------------------------
 st.markdown("""
     <style>
@@ -22,37 +21,17 @@ st.markdown("""
         }
         .block-container {
             padding-top: 1rem !important;
-            padding-bottom: 2.5rem !important;
-            max-width: 100% !important;
+            padding-bottom: 3rem !important;
         }
         .stButton button {
             width: 100%;
             height: 3rem;
-            font-size: 1.1rem !important;
+            font-size: 1.05rem !important;
             font-weight: bold;
             border-radius: 8px;
         }
     </style>
 """, unsafe_allow_html=True)
-
-components.html("""
-<script>
-    (function() {
-        let touchStartY = 0;
-        window.addEventListener('touchstart', function(e) {
-            touchStartY = e.touches[0].clientY;
-        }, { passive: false });
-
-        window.addEventListener('touchmove', function(e) {
-            const touchY = e.touches[0].clientY;
-            const touchDiff = touchY - touchStartY;
-            if (window.scrollY === 0 && touchDiff > 0) {
-                e.preventDefault();
-            }
-        }, { passive: false });
-    })();
-</script>
-""", height=0, width=0)
 
 # -------------------------------------------------------------
 # BASE DE DATOS
@@ -89,16 +68,16 @@ def init_db():
 init_db()
 
 # -------------------------------------------------------------
-# ESTADOS DE SESIÓN (PERSISTENCIA TOTAL EN MEMORIA)
+# MEMORIA DE SESIÓN (PERSISTENCIA INMUNIZADA A RECARGAS)
 # -------------------------------------------------------------
-if "pizarra_datos" not in st.session_state:
-    st.session_state["pizarra_datos"] = pd.DataFrame([
+if "lista_bloques" not in st.session_state:
+    st.session_state["lista_bloques"] = [
         {"Tipo": "Arranque", "Complejo / Ejercicios": "Jalón Arranque c/p rodilla + Arranque c/p rodilla + Clásico", "Series": 1, "Reps": 2, "% 1RM": 50},
         {"Tipo": "Arranque", "Complejo / Ejercicios": "Jalón Arranque c/p rodilla + Arranque c/p rodilla + Clásico", "Series": 1, "Reps": 2, "% 1RM": 60},
         {"Tipo": "Arranque", "Complejo / Ejercicios": "Jalón Arranque c/p rodilla + Arranque c/p rodilla + Clásico", "Series": 2, "Reps": 2, "% 1RM": 70},
         {"Tipo": "Arranque", "Complejo / Ejercicios": "Jalón Arranque c/p rodilla + Arranque c/p rodilla + Clásico", "Series": 4, "Reps": 1, "% 1RM": 80},
         {"Tipo": "Arranque", "Complejo / Ejercicios": "Jalón c/p + Clásico", "Series": 2, "Reps": 1, "% 1RM": 85},
-    ])
+    ]
 
 if "matriz_activa" not in st.session_state:
     st.session_state["matriz_activa"] = pd.DataFrame()
@@ -107,7 +86,7 @@ if "menu_nav" not in st.session_state:
     st.session_state["menu_nav"] = "⚙️ 1. Esquema y PRs"
 
 # -------------------------------------------------------------
-# BARRA LATERAL (SIDEBAR DE NAVEGACIÓN)
+# BARRA LATERAL
 # -------------------------------------------------------------
 st.sidebar.title("🏋️‍♂️ Navegación")
 
@@ -119,7 +98,7 @@ opciones_menu = [
 ]
 
 menu = st.sidebar.radio(
-    "Selecciona una vista:", 
+    "Ir a:", 
     opciones_menu, 
     index=opciones_menu.index(st.session_state["menu_nav"]),
     key="menu_radio"
@@ -127,78 +106,110 @@ menu = st.sidebar.radio(
 st.session_state["menu_nav"] = menu
 
 # -------------------------------------------------------------
-# MÓDULO 1: ESQUEMA Y PRs
+# MÓDULO 1: CONFIGURACIÓN Y ESQUEMA
 # -------------------------------------------------------------
 if menu == "⚙️ 1. Esquema y PRs":
-    st.title("⚙️ Configuración y Esquema")
+    st.title("⚙️ Configuración del Entrenamiento")
     
-    c1, c2 = st.columns(2)
-    with c1:
-        fecha_sel = st.date_input("Fecha", date.today(), key="cfg_fecha")
-        pr_arranque = st.number_input("PR Arranque (kg)", min_value=1.0, value=70.0, step=2.5, key="cfg_pr_arr")
-    with c2:
-        enfoque = st.selectbox("Enfoque General", ["Arranque + Envión", "Arranque", "Envión", "Fuerza"], key="cfg_enfoque")
-        pr_envion = st.number_input("PR Envión (kg)", min_value=1.0, value=90.0, step=2.5, key="cfg_pr_env")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.session_state["cfg_fecha"] = st.date_input("Fecha", st.session_state.get("cfg_fecha", date.today()))
+        st.session_state["cfg_pr_arr"] = st.number_input("PR Arranque (kg)", min_value=1.0, value=float(st.session_state.get("cfg_pr_arr", 70.0)), step=2.5)
+    with col_b:
+        st.session_state["cfg_enfoque"] = st.selectbox("Enfoque General", ["Arranque + Envión", "Arranque", "Envión", "Fuerza"], index=0)
+        st.session_state["cfg_pr_env"] = st.number_input("PR Envión (kg)", min_value=1.0, value=float(st.session_state.get("cfg_pr_env", 90.0)), step=2.5)
 
-    st.write("---")
-    st.subheader("1. Esquema de Series y Bloques")
-    st.caption("Configura tus ejercicios separando combos con '+' (ej. *Jalón c/p + Clásico*).")
-
-    cfg_pizarra = {
-        "Tipo": st.column_config.SelectboxColumn("Tipo", options=["Arranque", "Envión", "Fuerza"], required=True),
-        "Complejo / Ejercicios": st.column_config.TextColumn("Complejo / Ejercicios", width="large", required=True),
-        "Series": st.column_config.NumberColumn("Series", min_value=1, max_value=20, default=1),
-        "Reps": st.column_config.NumberColumn("Reps", min_value=1, max_value=20, default=1),
-        "% 1RM": st.column_config.NumberColumn("% 1RM", min_value=10, max_value=150, default=70, format="%d%%")
-    }
-
-    pizarra_editada = st.data_editor(
-        st.session_state["pizarra_datos"],
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config=cfg_pizarra,
-        key="editor_esquema_sb"
-    )
-    st.session_state["pizarra_datos"] = pizarra_editada
-
-    if st.button("⚡ Generar Matriz y Pasar al Entrenamiento", type="primary", key="btn_crear_matriz_sb"):
-        filas = []
-        for _, row in pizarra_editada.iterrows():
-            tipo_mov = str(row["Tipo"])
-            pr_base = pr_arranque if tipo_mov == "Arranque" else pr_envion
-            complejo_str = str(row["Complejo / Ejercicios"])
-            movimientos = [m.strip() for m in complejo_str.split("+") if m.strip()]
-            series = int(row["Series"]) if pd.notna(row["Series"]) else 1
-            reps = int(row["Reps"]) if pd.notna(row["Reps"]) else 1
-            pct = float(row["% 1RM"]) if pd.notna(row["% 1RM"]) else 70.0
-            peso = round((pr_base * (pct / 100.0)) * 2) / 2
+    st.divider()
+    st.subheader("➕ Agregar Ejercicio o Bloque")
+    
+    # Formulario protegido (No parpadea ni borra nada mientras escribes)
+    with st.form("form_nuevo_bloque", clear_on_submit=True):
+        f_tipo = st.selectbox("Tipo de Movimiento", ["Arranque", "Envión", "Fuerza"])
+        f_ejercicio = st.text_input("Complejo o Ejercicios (separa combos con '+')", placeholder="Ej: Jalón c/p + Clásico")
+        
+        c_s, c_r, c_p = st.columns(3)
+        with c_s:
+            f_series = st.number_input("Series", min_value=1, max_value=20, value=2, step=1)
+        with c_r:
+            f_reps = st.number_input("Reps", min_value=1, max_value=20, value=1, step=1)
+        with c_p:
+            f_pct = st.number_input("% 1RM", min_value=10, max_value=150, value=75, step=5)
             
-            for s in range(1, series + 1):
-                for r in range(1, reps + 1):
-                    for mov in movimientos:
-                        filas.append({
-                            "Tipo": tipo_mov,
-                            "Bloque": complejo_str,
-                            "Serie": f"S{s}",
-                            "Rep": f"Rep {r}",
-                            "Movimiento": mov,
-                            "Carga (kg)": float(peso),
-                            "% 1RM": f"{int(pct)}%",
-                            "Válido (✔)": True,
-                            "Observación Técnica": ""
-                        })
-        st.session_state["matriz_activa"] = pd.DataFrame(filas)
-        st.session_state["menu_nav"] = "🏋️‍♂️ 2. Registro en Vivo"
-        st.rerun()
+        btn_agregar = st.form_submit_button("➕ Agregar al Esquema")
+        if btn_agregar:
+            if f_ejercicio.strip():
+                st.session_state["lista_bloques"].append({
+                    "Tipo": f_tipo,
+                    "Complejo / Ejercicios": f_ejercicio.strip(),
+                    "Series": int(f_series),
+                    "Reps": int(f_reps),
+                    "% 1RM": float(f_pct)
+                })
+                st.success(f"¡Agregado: {f_ejercicio} ({f_series}x{f_reps} @ {f_pct}%)!")
+            else:
+                st.warning("Escribe el nombre del ejercicio antes de agregar.")
+
+    st.divider()
+    st.subheader("📋 Bloques Planificados para Hoy")
+    
+    if len(st.session_state["lista_bloques"]) == 0:
+        st.info("No hay bloques agregados todavía. Usa el formulario de arriba.")
+    else:
+        df_mostrar = pd.DataFrame(st.session_state["lista_bloques"])
+        st.dataframe(df_mostrar, use_container_width=True)
+        
+        col_b1, col_b2 = st.columns(2)
+        with col_b1:
+            if st.button("🗑️ Borrar Último Bloque"):
+                st.session_state["lista_bloques"].pop()
+                st.rerun()
+        with col_b2:
+            if st.button("🧹 Limpiar Todo el Esquema"):
+                st.session_state["lista_bloques"] = []
+                st.rerun()
+
+        st.write("")
+        if st.button("⚡ Generar Matriz y Pasar al Entrenamiento", type="primary"):
+            filas = []
+            pr_arr = float(st.session_state["cfg_pr_arr"])
+            pr_env = float(st.session_state["cfg_pr_env"])
+            
+            for row in st.session_state["lista_bloques"]:
+                tipo_mov = row["Tipo"]
+                pr_base = pr_arr if tipo_mov == "Arranque" else pr_env
+                complejo_str = row["Complejo / Ejercicios"]
+                movimientos = [m.strip() for m in complejo_str.split("+") if m.strip()]
+                series = int(row["Series"])
+                reps = int(row["Reps"])
+                pct = float(row["% 1RM"])
+                peso = round((pr_base * (pct / 100.0)) * 2) / 2
+                
+                for s in range(1, series + 1):
+                    for r in range(1, reps + 1):
+                        for mov in movimientos:
+                            filas.append({
+                                "Tipo": tipo_mov,
+                                "Bloque": complejo_str,
+                                "Serie": f"S{s}",
+                                "Rep": f"Rep {r}",
+                                "Movimiento": mov,
+                                "Carga (kg)": float(peso),
+                                "% 1RM": f"{int(pct)}%",
+                                "Válido (✔)": True,
+                                "Observación Técnica": ""
+                            })
+            st.session_state["matriz_activa"] = pd.DataFrame(filas)
+            st.session_state["menu_nav"] = "🏋️‍♂️ 2. Registro en Vivo"
+            st.rerun()
 
 # -------------------------------------------------------------
 # MÓDULO 2: REGISTRO EN VIVO
 # -------------------------------------------------------------
 elif menu == "🏋️‍♂️ 2. Registro en Vivo":
-    st.title("🏋️‍♂️ Registro de Ejecución en Vivo")
+    st.title("🏋️‍♂️ Registro de Levantamientos")
     
     if st.session_state["matriz_activa"].empty:
-        st.info("👈 Primero ve a la barra lateral, entra a **'1. Esquema y PRs'** y pulsa **'Generar Matriz'**.")
+        st.info("👈 Primero ve a **'1. Esquema y PRs'** en la barra lateral y presiona **'Generar Matriz'**.")
     else:
         cfg_matriz = {
             "Tipo": st.column_config.TextColumn("Tipo", disabled=True),
@@ -217,12 +228,12 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
             num_rows="fixed",
             use_container_width=True,
             column_config=cfg_matriz,
-            key="editor_matriz_sb"
+            key="editor_matriz_final"
         )
         st.session_state["matriz_activa"] = matriz_final
 
         st.write("")
-        if st.button("💾 Guardar Entrenamiento Completo", type="primary", key="btn_guardar_bd_sb"):
+        if st.button("💾 Guardar Entrenamiento Completo", type="primary"):
             conn = get_db_connection()
             c = conn.cursor()
             fecha_guardar = str(st.session_state.get("cfg_fecha", date.today()))
@@ -232,7 +243,7 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
             for _, r in matriz_final.iterrows():
                 valido = bool(r["Válido (✔)"]) if pd.notna(r["Válido (✔)"]) else False
                 res = "Completado" if valido else "Falla"
-                pr_base = pr_arranque = pr_arr_g if r["Tipo"] == "Arranque" else pr_env_g
+                pr_base = pr_arr_g if r["Tipo"] == "Arranque" else pr_env_g
                 obs = str(r["Observación Técnica"]) if pd.notna(r["Observación Técnica"]) else ""
                 
                 c.execute("""
@@ -246,7 +257,7 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
                 ))
             conn.commit()
             conn.close()
-            st.success("✅ ¡Sesión guardada con éxito en la base de datos!")
+            st.success("✅ ¡Entrenamiento guardado con éxito!")
             st.session_state["matriz_activa"] = pd.DataFrame()
             st.session_state["menu_nav"] = "🔍 Detalle Diario"
             st.rerun()
@@ -261,10 +272,10 @@ elif menu == "🔍 Detalle Diario":
     conn.close()
 
     if df_raw.empty:
-        st.info("Aún no tienes entrenamientos guardados.")
+        st.info("Aún no tienes entrenamientos registrados.")
     else:
         fechas = sorted(df_raw["fecha"].dropna().unique(), reverse=True)
-        fecha_sel = st.selectbox("Selecciona la fecha", fechas, key="sel_fecha_historial_sb")
+        fecha_sel = st.selectbox("Selecciona la fecha", fechas)
         df_dia = df_raw[df_raw["fecha"] == fecha_sel]
 
         tot_movs = len(df_dia)
@@ -273,7 +284,7 @@ elif menu == "🔍 Detalle Diario":
         pct_efectividad = (tot_val / tot_movs * 100) if tot_movs > 0 else 0
 
         c1, c2, c3 = st.columns(3)
-        c1.metric("Efectividad", f"{pct_efectividad:.1f}%")
+        c1.metric("Efectividad Global", f"{pct_efectividad:.1f}%")
         c2.metric("Válidos", tot_val)
         c3.metric("Fallas", tot_fal)
 
@@ -289,13 +300,13 @@ elif menu == "🔍 Detalle Diario":
 # MÓDULO 4: DASHBOARD SEMESTRAL
 # -------------------------------------------------------------
 elif menu == "📊 Dashboard Semestral":
-    st.title("📈 Curva de Rendimiento Semestral")
+    st.title("📈 Progreso Semestral")
     conn = get_db_connection()
     df_all = pd.read_sql_query("SELECT * FROM intentos", conn)
     conn.close()
 
     if df_all.empty:
-        st.info("Registra más entrenamientos para generar las curvas estadísticas.")
+        st.info("Registra más sesiones para ver las estadísticas acumuladas.")
     else:
         df_all["fecha"] = pd.to_datetime(df_all["fecha"])
         df_all["is_comp"] = df_all["resultado"] == "Completado"
@@ -312,7 +323,7 @@ elif menu == "📊 Dashboard Semestral":
             y="% Efectividad",
             color="tipo_sesion",
             markers=True,
-            title="Efectividad Técnica: Arranque vs Envión",
+            title="Curva de Efectividad Técnica: Arranque vs Envión",
             labels={"fecha": "Fecha", "% Efectividad": "% Éxito", "tipo_sesion": "Levantamiento"}
         )
         fig_line.update_yaxes(range=[0, 105])
