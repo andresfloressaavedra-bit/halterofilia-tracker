@@ -1,5 +1,6 @@
 streamlit
 pandas
 plotly
-requests
+pillow
+pytesseract
 openpyxl
