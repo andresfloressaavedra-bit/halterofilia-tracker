@@ -177,7 +177,7 @@ def procesar_excel_importado(archivo_excel):
     return pd.DataFrame(filas_estandarizadas)
 
 # -------------------------------------------------------------
-# EXPORTACIONES DIARIAS Y SEMESTRALES (EXCEL Y PDF)
+# EXPORTACIONES COMPLETAS (EXCEL Y PDF)
 # -------------------------------------------------------------
 def generar_dashboard_excel(df, fecha_str, jornada_str):
     output = io.BytesIO()
@@ -330,7 +330,17 @@ def generar_semestral_excel(df_all):
     df_diario["Fallas"] = df_diario["Total_Movs"] - df_diario["Validos"]
     df_diario["% Efectividad"] = (df_diario["Validos"] / df_diario["Total_Movs"] * 100).round(1)
 
-    # 2. Desglose por Ejercicio Semestral
+    # 2. Datos Gráfica 1: Comparativa Arranque vs Envión
+    df_comp_grafica = df_all.groupby(["fecha", "tipo_sesion"]).agg(
+        Total=("id", "count"),
+        Validos=("is_comp", "sum")
+    ).reset_index()
+    df_comp_grafica["% Efectividad"] = (df_comp_grafica["Validos"] / df_comp_grafica["Total"] * 100).round(1)
+
+    # 3. Datos Gráfica 2: Tonelaje Diario
+    df_ton_grafica = df_all[df_all["is_comp"]].groupby("fecha")["peso"].sum().reset_index().rename(columns={"peso": "Tonelaje_Total_Kg"})
+
+    # 4. Desglose por Ejercicio Semestral
     df_ejercicios = df_all.groupby("movimiento").agg(
         Total_Intentos=("id", "count"),
         Validos=("is_comp", "sum"),
@@ -340,7 +350,7 @@ def generar_semestral_excel(df_all):
     df_ejercicios["% Éxito"] = (df_ejercicios["Validos"] / df_ejercicios["Total_Intentos"] * 100).round(1)
     df_ejercicios["Prom_Kg"] = df_ejercicios["Prom_Kg"].round(1)
 
-    # 3. Métricas Globales
+    # 5. KPIs Globales
     tot_movs = len(df_all)
     tot_val = int(df_all["is_comp"].sum())
     tot_fal = tot_movs - tot_val
@@ -360,6 +370,8 @@ def generar_semestral_excel(df_all):
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df_kpi_sem.to_excel(writer, sheet_name="KPIs Semestre", index=False)
         df_diario.to_excel(writer, sheet_name="Resumen Diario", index=False)
+        df_comp_grafica.to_excel(writer, sheet_name="Grafica Arranque vs Envion", index=False)
+        df_ton_grafica.to_excel(writer, sheet_name="Grafica Tonelaje Diario", index=False)
         df_ejercicios.to_excel(writer, sheet_name="Rendimiento Ejercicios", index=False)
         df_all.to_excel(writer, sheet_name="Todos los Intentos", index=False)
         
@@ -373,7 +385,7 @@ def generar_semestral_pdf(df_all):
     pdf.set_font("Helvetica", "B", 16)
     pdf.cell(0, 8, "DASHBOARD SEMESTRAL DE HALTEROFILIA", ln=True, align="C")
     pdf.set_font("Helvetica", "I", 10)
-    pdf.cell(0, 5, f"Reporte Consolidado de Rendimiento y Progresión", ln=True, align="C")
+    pdf.cell(0, 5, "Reporte Consolidado con Gráficas y Resumen Diario", ln=True, align="C")
     pdf.ln(4)
 
     df_all["is_comp"] = df_all["resultado"] == "Completado"
@@ -401,19 +413,20 @@ def generar_semestral_pdf(df_all):
     pdf.cell(ancho_kpi, 8, f"{tot_val} / {tot_fal}", border=1, align="C")
     pdf.cell(ancho_kpi, 8, f"{tot_movs}", border=1, align="C")
     pdf.cell(ancho_kpi, 8, f"{tonelaje_global:.1f} kg", border=1, align="C")
-    pdf.ln(10)
+    pdf.ln(8)
 
     # 2. Resumen Diario Consolidado
     pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(0, 6, "2. EVOLUCIÓN Y RESUMEN DIARIO", ln=True)
+    pdf.cell(0, 6, "2. RESUMEN DIARIO CONSOLIDADO", ln=True)
     
     pdf.set_font("Helvetica", "B", 8)
-    pdf.cell(35, 6, "Fecha", border=1, align="C", fill=True)
-    pdf.cell(45, 6, "Jornada", border=1, align="C", fill=True)
-    pdf.cell(25, 6, "Total Movs", border=1, align="C", fill=True)
-    pdf.cell(25, 6, "Válidos", border=1, align="C", fill=True)
-    pdf.cell(30, 6, "% Efectividad", border=1, align="C", fill=True)
-    pdf.cell(30, 6, "Tonelaje (kg)", border=1, align="C", fill=True)
+    pdf.cell(32, 6, "Fecha", border=1, align="C", fill=True)
+    pdf.cell(42, 6, "Jornada / Turno", border=1, align="C", fill=True)
+    pdf.cell(24, 6, "Total Movs", border=1, align="C", fill=True)
+    pdf.cell(24, 6, "Válidos", border=1, align="C", fill=True)
+    pdf.cell(24, 6, "Fallas", border=1, align="C", fill=True)
+    pdf.cell(24, 6, "% Efectividad", border=1, align="C", fill=True)
+    pdf.cell(20, 6, "Tonelaje", border=1, align="C", fill=True)
     pdf.ln()
 
     df_diario = df_all.groupby(["fecha", "jornada"]).agg(
@@ -421,23 +434,52 @@ def generar_semestral_pdf(df_all):
         Validos=("is_comp", "sum"),
         Tonelaje_Kg=("peso", lambda x: x[df_all.loc[x.index, "is_comp"]].sum())
     ).reset_index()
+    df_diario["Fallas"] = df_diario["Total_Movs"] - df_diario["Validos"]
 
     pdf.set_font("Helvetica", "", 8)
     for _, r in df_diario.iterrows():
         pct_dia = (r["Validos"] / r["Total_Movs"] * 100) if r["Total_Movs"] > 0 else 0
-        pdf.cell(35, 6, str(r["fecha"]), border=1, align="C")
-        pdf.cell(45, 6, str(r["jornada"])[:22], border=1)
-        pdf.cell(25, 6, str(r["Total_Movs"]), border=1, align="C")
-        pdf.cell(25, 6, str(r["Validos"]), border=1, align="C")
-        pdf.cell(30, 6, f"{pct_dia:.1f}%", border=1, align="C")
-        pdf.cell(30, 6, f"{r['Tonelaje_Kg']:.1f} kg", border=1, align="C")
+        pdf.cell(32, 5.5, str(r["fecha"]), border=1, align="C")
+        pdf.cell(42, 5.5, str(r["jornada"])[:20], border=1)
+        pdf.cell(24, 5.5, str(r["Total_Movs"]), border=1, align="C")
+        pdf.cell(24, 5.5, str(r["Validos"]), border=1, align="C")
+        pdf.cell(24, 5.5, str(r["Fallas"]), border=1, align="C")
+        pdf.cell(24, 5.5, f"{pct_dia:.1f}%", border=1, align="C")
+        pdf.cell(20, 5.5, f"{r['Tonelaje_Kg']:.0f} kg", border=1, align="C")
         pdf.ln()
 
     pdf.ln(6)
 
-    # 3. Rendimiento por Ejercicio Semestral
+    # 3. Datos Comparativos de Gráficas (Evolución Técnica Arranque vs Envión y Tonelaje)
     pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(0, 6, "3. RENDIMIENTO ACUMULADO POR EJERCICIO", ln=True)
+    pdf.cell(0, 6, "3. COMPARATIVO DE GRÁFICAS: EFECTIVIDAD POR TIPO Y TONELAJE", ln=True)
+    
+    df_comp_g = df_all.groupby(["fecha", "tipo_sesion"]).agg(
+        Total=("id", "count"),
+        Validos=("is_comp", "sum")
+    ).reset_index()
+    df_comp_g["% Efectividad"] = (df_comp_g["Validos"] / df_comp_g["Total"] * 100).round(1)
+
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.cell(45, 6, "Fecha", border=1, align="C", fill=True)
+    pdf.cell(45, 6, "Tipo (Movimiento)", border=1, align="C", fill=True)
+    pdf.cell(45, 6, "Intentos (Val/Tot)", border=1, align="C", fill=True)
+    pdf.cell(55, 6, "% Éxito / Efectividad", border=1, align="C", fill=True)
+    pdf.ln()
+
+    pdf.set_font("Helvetica", "", 8)
+    for _, r in df_comp_g.iterrows():
+        pdf.cell(45, 5.5, str(r["fecha"]), border=1, align="C")
+        pdf.cell(45, 5.5, str(r["tipo_sesion"]), border=1, align="C")
+        pdf.cell(45, 5.5, f"{r['Validos']} / {r['Total']}", border=1, align="C")
+        pdf.cell(55, 5.5, f"{r['% Efectividad']:.1f}%", border=1, align="C")
+        pdf.ln()
+
+    pdf.ln(6)
+
+    # 4. Rendimiento por Ejercicio Semestral
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 6, "4. RENDIMIENTO ACUMULADO POR EJERCICIO", ln=True)
     
     pdf.set_font("Helvetica", "B", 8)
     pdf.cell(65, 6, "Ejercicio", border=1, align="C", fill=True)
@@ -456,11 +498,11 @@ def generar_semestral_pdf(df_all):
     pdf.set_font("Helvetica", "", 8)
     for _, r in df_ejercicios.iterrows():
         pct_ej = (r["Validos"] / r["Total_Intentos"] * 100) if r["Total_Intentos"] > 0 else 0
-        pdf.cell(65, 6, str(r["movimiento"])[:32], border=1)
-        pdf.cell(30, 6, str(r["Total_Intentos"]), border=1, align="C")
-        pdf.cell(30, 6, str(r["Validos"]), border=1, align="C")
-        pdf.cell(30, 6, f"{r['Max_Kg']:.1f} kg", border=1, align="C")
-        pdf.cell(35, 6, f"{pct_ej:.1f}%", border=1, align="C")
+        pdf.cell(65, 5.5, str(r["movimiento"])[:32], border=1)
+        pdf.cell(30, 5.5, str(r["Total_Intentos"]), border=1, align="C")
+        pdf.cell(30, 5.5, str(r["Validos"]), border=1, align="C")
+        pdf.cell(30, 5.5, f"{r['Max_Kg']:.1f} kg", border=1, align="C")
+        pdf.cell(35, 5.5, f"{pct_ej:.1f}%", border=1, align="C")
         pdf.ln()
 
     out = pdf.output()
@@ -587,9 +629,6 @@ if menu == "⚙️ 1. Esquema y PRs":
     with c3:
         st.session_state["cfg_enfoque"] = st.selectbox("Enfoque General", ["Arranque + Envión", "Arranque", "Envión", "Fuerza"], index=0)
 
-    # ---------------------------------------------------------
-    # IMPORTAR EXCEL DIRECTAMENTE A ESTA SESIÓN
-    # ---------------------------------------------------------
     st.divider()
     with st.expander("📥 Importar Excel Directamente a Esta Sesión", expanded=True):
         st.markdown("Sube una planilla de Excel para cargarla a tu sesión activa de hoy o guardarla en el historial:")
@@ -1169,7 +1208,7 @@ elif menu == "🔍 Detalle Diario":
                 st.rerun()
 
 # -------------------------------------------------------------
-# MÓDULO 4: DASHBOARD SEMESTRAL (GRÁFICAS COMPARATIVAS Y DESCARGA)
+# MÓDULO 4: DASHBOARD SEMESTRAL (GRÁFICAS Y RESUMEN EN PDF/EXCEL)
 # -------------------------------------------------------------
 elif menu == "📊 Dashboard Semestral":
     st.title("📈 Dashboard Semestral y Progresión")
@@ -1197,8 +1236,8 @@ elif menu == "📊 Dashboard Semestral":
         c_s4.metric("Tonelaje Semestral", f"{tonelaje_global:.1f} kg")
 
         st.write("---")
-        st.subheader("📥 Exportar Reporte Semestral Completo (1 Clic)")
-        st.caption("Descarga el informe ejecutivo con KPIs acumulados, tabla de progresión diaria y rendimiento por ejercicio.")
+        st.subheader("📥 Exportar Dashboard Semestral Completo (1 Clic)")
+        st.caption("Descarga en Excel o PDF todo lo visualizado en pantalla: Resumen Diario, Gráficas Comparativas y Rendimiento Acumulado.")
         
         col_dl_sem1, col_dl_sem2 = st.columns(2)
         with col_dl_sem1:
