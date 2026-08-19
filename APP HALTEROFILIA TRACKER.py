@@ -106,12 +106,79 @@ def cargar_estado_disco(clave, valor_defecto):
     return valor_defecto
 
 # -------------------------------------------------------------
-# FUNCIONES DE DASHBOARD DIARIO (EXCEL Y PDF MULTI-SECCIÓN)
+# FUNCIONES DE EXPORTACIÓN Y PLANTILLAS
 # -------------------------------------------------------------
+def generar_plantilla_excel():
+    output = io.BytesIO()
+    df_ejemplo = pd.DataFrame([
+        {"Tipo": "Arranque", "Serie": "S1", "Rep": "Rep 1", "Movimiento": "Jalón Arranque c/p", "Kg": 50.0, "% 1RM": 70, "Estado": "Completado", "Observación": "Buena extensión"},
+        {"Tipo": "Arranque", "Serie": "S1", "Rep": "Rep 2", "Movimiento": "Clásico", "Kg": 50.0, "% 1RM": 70, "Estado": "Completado", "Observación": ""},
+        {"Tipo": "Envión", "Serie": "S1", "Rep": "Rep 1", "Movimiento": "Clean + Jerk", "Kg": 70.0, "% 1RM": 75, "Estado": "Completado", "Observación": "Codos rápidos"},
+    ])
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_ejemplo.to_excel(writer, sheet_name="Plantilla", index=False)
+    return output.getvalue()
+
+def procesar_excel_importado(archivo_excel):
+    df_in = pd.read_excel(archivo_excel)
+    columnas_map = {}
+    for col in df_in.columns:
+        col_low = str(col).lower().strip()
+        if "tipo" in col_low:
+            columnas_map[col] = "Tipo"
+        elif "serie" in col_low:
+            columnas_map[col] = "Serie"
+        elif "rep" in col_low:
+            columnas_map[col] = "Rep"
+        elif "mov" in col_low or "ejercicio" in col_low:
+            columnas_map[col] = "Movimiento"
+        elif "kg" in col_low or "peso" in col_low or "carga" in col_low:
+            columnas_map[col] = "Carga (kg)"
+        elif "%" in col_low or "pct" in col_low or "1rm" in col_low:
+            columnas_map[col] = "% 1RM"
+        elif "estado" in col_low or "result" in col_low or "valido" in col_low or "válido" in col_low:
+            columnas_map[col] = "Estado"
+        elif "obs" in col_low or "nota" in col_low or "coment" in col_low:
+            columnas_map[col] = "Observación Técnica"
+            
+    df_in = df_in.rename(columns=columnas_map)
+    
+    filas_estandarizadas = []
+    for _, r in df_in.iterrows():
+        tipo = str(r.get("Tipo", "Arranque")).strip()
+        if tipo not in ["Arranque", "Envión", "Fuerza"]:
+            tipo = "Arranque"
+        serie = str(r.get("Serie", "S1")).strip()
+        rep = str(r.get("Rep", "Rep 1")).strip()
+        mov = str(r.get("Movimiento", "Ejercicio")).strip()
+        try:
+            kg = float(r.get("Carga (kg)", 0.0))
+        except Exception:
+            kg = 0.0
+        try:
+            pct_raw = str(r.get("% 1RM", "70")).replace("%", "").strip()
+            pct = float(pct_raw) if pct_raw else 70.0
+        except Exception:
+            pct = 70.0
+            
+        estado_raw = str(r.get("Estado", "Completado")).lower().strip()
+        valido = estado_raw in ["completado", "válido", "valido", "true", "1", "si", "sí", "ok"]
+        obs = str(r.get("Observación Técnica", "")) if pd.notna(r.get("Observación Técnica")) else ""
+        
+        filas_estandarizadas.append({
+            "Tipo": tipo,
+            "Serie": serie,
+            "Rep": rep,
+            "Movimiento": mov,
+            "Carga (kg)": kg,
+            "% 1RM": f"{int(pct)}%",
+            "Válido (✔)": valido,
+            "Observación Técnica": obs
+        })
+    return pd.DataFrame(filas_estandarizadas)
+
 def generar_dashboard_excel(df, fecha_str, jornada_str):
     output = io.BytesIO()
-    
-    # 1. Métricas Globales
     tot_movs = len(df)
     tot_val = len(df[df["resultado"] == "Completado"])
     tot_fal = len(df[df["resultado"] == "Falla"])
@@ -128,7 +195,6 @@ def generar_dashboard_excel(df, fecha_str, jornada_str):
         {"Métrica": "Tonelaje Total Válido (kg)", "Valor": f"{tonelaje:.1f} kg"}
     ])
 
-    # 2. Desglose por Ejercicio
     df_temp = df.copy()
     df_temp["es_valido"] = df_temp["resultado"] == "Completado"
     df_resumen_ej = df_temp.groupby("movimiento").agg(
@@ -152,21 +218,18 @@ def generar_dashboard_pdf(df, fecha_str, jornada_str):
     pdf.set_auto_page_break(auto=True, margin=12)
     pdf.add_page()
     
-    # Encabezado Principal
     pdf.set_font("Helvetica", "B", 16)
     pdf.cell(0, 8, "DASHBOARD DIARIO DE ENTRENAMIENTO", ln=True, align="C")
     pdf.set_font("Helvetica", "I", 10)
     pdf.cell(0, 5, f"Fecha: {fecha_str} | Turno: {jornada_str}", ln=True, align="C")
     pdf.ln(4)
 
-    # Cálculos
     tot_movs = len(df)
     tot_val = len(df[df["resultado"] == "Completado"])
     tot_fal = len(df[df["resultado"] == "Falla"])
     pct_efectividad = (tot_val / tot_movs * 100) if tot_movs > 0 else 0
     tonelaje = df[df["resultado"] == "Completado"]["peso"].sum() if "peso" in df.columns else 0.0
 
-    # Tarjetas de Métricas (Tabla KPIs)
     pdf.set_font("Helvetica", "B", 10)
     pdf.cell(0, 6, "1. RESUMEN Y TONELAJE DE SESIÓN", ln=True)
     pdf.set_font("Helvetica", "", 9)
@@ -186,10 +249,8 @@ def generar_dashboard_pdf(df, fecha_str, jornada_str):
     pdf.cell(ancho_kpi, 8, f"{tonelaje:.1f} kg", border=1, align="C")
     pdf.ln(10)
 
-    # 2. Desglose por Ejercicio
     pdf.set_font("Helvetica", "B", 10)
     pdf.cell(0, 6, "2. RENDIMIENTO POR EJERCICIO", ln=True)
-    
     pdf.set_font("Helvetica", "B", 8)
     pdf.cell(65, 6, "Ejercicio", border=1, align="C", fill=True)
     pdf.cell(30, 6, "Intentos", border=1, align="C", fill=True)
@@ -217,8 +278,6 @@ def generar_dashboard_pdf(df, fecha_str, jornada_str):
         pdf.ln()
 
     pdf.ln(6)
-
-    # 3. Planilla Detallada
     pdf.set_font("Helvetica", "B", 10)
     pdf.cell(0, 6, "3. REGISTRO DETALLADO INTENTO POR INTENTO", ln=True)
     
@@ -349,7 +408,7 @@ menu = st.sidebar.radio(
 st.session_state["menu_nav"] = menu
 
 # -------------------------------------------------------------
-# MÓDULO 1: CONFIGURACIÓN Y ESQUEMA
+# MÓDULO 1: CONFIGURACIÓN Y ESQUEMA (CON SUBIDA EXCEL)
 # -------------------------------------------------------------
 if menu == "⚙️ 1. Esquema y PRs":
     st.title("⚙️ Configuración del Entrenamiento")
@@ -375,8 +434,76 @@ if menu == "⚙️ 1. Esquema y PRs":
     with c3:
         st.session_state["cfg_enfoque"] = st.selectbox("Enfoque General", ["Arranque + Envión", "Arranque", "Envión", "Fuerza"], index=0)
 
+    # ---------------------------------------------------------
+    # SUBIDA MASIVA DESDE EXCEL
+    # ---------------------------------------------------------
     st.divider()
-    st.subheader("➕ Agregar Ejercicio o Bloque")
+    with st.expander("📥 Importar Planilla Completa de Sesión desde Excel"):
+        st.markdown("Sube un archivo de Excel con tus levantamientos planificados o realizados para cargarlos directamente a la matriz.")
+        
+        col_imp1, col_imp2 = st.columns([1, 2])
+        with col_imp1:
+            plantilla_bytes = generar_plantilla_excel()
+            st.download_button(
+                label="📄 Descargar Plantilla Excel Ejemplo",
+                data=plantilla_bytes,
+                file_name="Plantilla_Halterofilia_Ejemplo.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="btn_dl_plantilla_cfg"
+            )
+        
+        archivo_excel = st.file_uploader("Selecciona archivo Excel (.xlsx)", type=["xlsx", "xls"], key="uploader_excel_cfg")
+        if archivo_excel is not None:
+            try:
+                df_excel_procesado = procesar_excel_importado(archivo_excel)
+                st.write("**Previsualización de datos importados:**")
+                st.dataframe(df_excel_procesado, use_container_width=True)
+                
+                col_btn_in1, col_btn_in2 = st.columns(2)
+                with col_btn_in1:
+                    if st.button("⚡ Cargar a la Matriz Activa para Entrenar", type="primary"):
+                        st.session_state["matriz_activa"] = df_excel_procesado
+                        guardar_estado_disco("matriz_activa", df_excel_procesado.to_dict(orient="records"))
+                        st.success("¡Planilla cargada en la matriz activa!")
+                        st.session_state["menu_nav"] = "🏋️‍♂️ 2. Registro en Vivo"
+                        st.rerun()
+                
+                with col_btn_in2:
+                    if st.button("💾 Guardar Directo al Historial (Sin pasar por el Registro en Vivo)"):
+                        conn = get_db_connection()
+                        c = conn.cursor()
+                        f_imp = str(st.session_state.get("cfg_fecha", date.today()))
+                        j_imp = str(st.session_state.get("cfg_jornada", "Sesión 1"))
+                        pr_arr_g = float(cargar_estado_disco("pr_arr", 70.0))
+                        pr_env_g = float(cargar_estado_disco("pr_env", 90.0))
+                        
+                        for _, r in df_excel_procesado.iterrows():
+                            valido = bool(r["Válido (✔)"])
+                            res = "Completado" if valido else "Falla"
+                            tipo_actual = str(r["Tipo"])
+                            pr_base = pr_arr_g if tipo_actual == "Arranque" else pr_env_g
+                            obs = str(r["Observación Técnica"])
+                            
+                            c.execute("""
+                                INSERT INTO intentos (fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                f_imp, tipo_actual, float(pr_base), str(r.get("Movimiento", "")),
+                                str(r.get("Serie", "S1")), str(r.get("Rep", "Rep 1")), str(r.get("Movimiento", "")),
+                                float(str(r.get("% 1RM", "70")).replace("%", "") if str(r.get("% 1RM", "70")).replace("%", "").isdigit() else 70.0),
+                                float(r.get("Carga (kg)", 0.0)), res, obs, j_imp
+                            ))
+                        conn.commit()
+                        conn.close()
+                        st.success(f"✅ ¡Sesión guardada en el historial para el {f_imp} ({j_imp})!")
+                        st.session_state["menu_nav"] = "🔍 Detalle Diario"
+                        st.rerun()
+
+            except Exception as e:
+                st.error(f"Error al leer el archivo Excel: {e}")
+
+    st.divider()
+    st.subheader("➕ Agregar Ejercicio o Bloque Manualmente")
     
     with st.form("form_nuevo_bloque", clear_on_submit=True):
         f_tipo = st.selectbox("Tipo de Movimiento", ["Arranque", "Envión", "Fuerza"])
@@ -410,7 +537,7 @@ if menu == "⚙️ 1. Esquema y PRs":
     st.subheader("📋 Bloques Planificados para Esta Sesión")
     
     if len(st.session_state["lista_bloques"]) == 0:
-        st.info("No hay bloques agregados todavía. Usa el formulario de arriba.")
+        st.info("No hay bloques agregados todavía. Usa el formulario de arriba o importa un Excel.")
     else:
         df_bloques = pd.DataFrame(st.session_state["lista_bloques"])
         
@@ -526,7 +653,7 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
                 st.warning("Escribe el nombre del ejercicio extra.")
 
     if st.session_state["matriz_activa"].empty:
-        st.info("👈 Primero ve a **'1. Esquema y PRs'** en la barra lateral y presiona **'Generar Matriz'**, o añade ejercicios arriba.")
+        st.info("👈 Primero ve a **'1. Esquema y PRs'** en la barra lateral y presiona **'Generar Matriz'**, o sube un Excel.")
     else:
         cfg_matriz = {
             "Tipo": st.column_config.SelectboxColumn("Tipo", options=["Arranque", "Envión", "Fuerza"], required=True),
@@ -675,7 +802,7 @@ elif menu == "🔍 Detalle Diario":
 
         st.write("---")
         
-        # Herramientas avanzadas (Copiar Sesión, Mover Ejercicio y Cambiar Fecha)
+        # Herramientas avanzadas (Copiar Sesión, Mover Ejercicio, Importar Excel y Cambiar Fecha)
         col_h1, col_h2 = st.columns(2)
         
         with col_h1:
@@ -729,6 +856,41 @@ elif menu == "🔍 Detalle Diario":
                     st.success("¡Ejercicio transferido exitosamente!")
                     st.rerun()
 
+        with st.expander("📥 Importar Excel Directamente a Esta Sesión"):
+            archivo_excel_hist = st.file_uploader("Subir Excel para agregar o reemplazar a esta sesión:", type=["xlsx", "xls"], key="uploader_hist")
+            if archivo_excel_hist is not None:
+                try:
+                    df_imp_hist = procesar_excel_importado(archivo_excel_hist)
+                    st.write("**Previsualización:**")
+                    st.dataframe(df_imp_hist, use_container_width=True)
+                    if st.button("➕ Anexar estos datos a la Sesión Actual"):
+                        conn = get_db_connection()
+                        c = conn.cursor()
+                        pr_arr_g = float(cargar_estado_disco("pr_arr", 70.0))
+                        pr_env_g = float(cargar_estado_disco("pr_env", 90.0))
+                        
+                        for _, r in df_imp_hist.iterrows():
+                            valido = bool(r["Válido (✔)"])
+                            res = "Completado" if valido else "Falla"
+                            tipo_actual = str(r["Tipo"])
+                            pr_base = pr_arr_g if tipo_actual == "Arranque" else pr_env_g
+                            obs = str(r["Observación Técnica"])
+                            c.execute("""
+                                INSERT INTO intentos (fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                fecha_actual_sesion, tipo_actual, float(pr_base), str(r.get("Movimiento", "")),
+                                str(r.get("Serie", "S1")), str(r.get("Rep", "Rep 1")), str(r.get("Movimiento", "")),
+                                float(str(r.get("% 1RM", "70")).replace("%", "") if str(r.get("% 1RM", "70")).replace("%", "").isdigit() else 70.0),
+                                float(r.get("Carga (kg)", 0.0)), res, obs, jornada_actual_sesion
+                            ))
+                        conn.commit()
+                        conn.close()
+                        st.success("¡Datos anexados a la sesión!")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Error al leer Excel: {e}")
+
         with st.expander("📅 Cambiar Fecha de la Sesión Completa"):
             nueva_fecha_glob = st.date_input("Nueva fecha para toda esta sesión:", pd.to_datetime(fecha_actual_sesion).date(), key="n_f_g")
             if st.button("🔄 Aplicar Nueva Fecha"):
@@ -744,7 +906,7 @@ elif menu == "🔍 Detalle Diario":
                 st.success(f"Sesión transferida al {nueva_fecha_glob}")
                 st.rerun()
 
-        with st.expander("➕ Añadir Ejercicio Retroactivo a Esta Sesión"):
+        with st.expander("➕ Añadir Ejercicio Retroactivo Manual"):
             with st.form("form_retroactivo"):
                 col_r1, col_r2, col_r3 = st.columns(3)
                 with col_r1:
