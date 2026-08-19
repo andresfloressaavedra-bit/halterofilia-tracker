@@ -3,9 +3,6 @@ import pandas as pd
 import sqlite3
 import plotly.express as px
 import json
-import re
-from PIL import Image
-import pytesseract
 from datetime import date
 
 st.set_page_config(
@@ -98,56 +95,6 @@ def cargar_estado_disco(clave, valor_defecto):
     return valor_defecto
 
 # -------------------------------------------------------------
-# MOTOR DE LECTURA OCR LOCAL (SIN CLAVES NI ERRORES 401)
-# -------------------------------------------------------------
-def procesar_foto_ocr(image_file):
-    img = Image.open(image_file)
-    texto = pytesseract.image_to_string(img, lang="spa+eng")
-    
-    lineas = [l.strip() for l in texto.split("\n") if len(l.strip()) > 3]
-    bloques_detectados = []
-    
-    for linea in lineas:
-        tipo = "Arranque"
-        l_lower = linea.lower()
-        if "envion" in l_lower or "clean" in l_lower or "jerk" in l_lower:
-            tipo = "Envión"
-        elif "sentadilla" in l_lower or "fuerza" in l_lower or "press" in l_lower or "pull" in l_lower:
-            tipo = "Fuerza"
-
-        # Buscar patrones tipo 4x2 @ 80% o 3x1 @ 75
-        series, reps, pct = 2, 1, 75
-        match_sxr = re.search(r"(\d+)\s*[xX*]\s*(\d+)", linea)
-        if match_sxr:
-            series = int(match_sxr.group(1))
-            reps = int(match_sxr.group(2))
-            
-        match_pct = re.search(r"(\d{2,3})\s*%", linea)
-        if match_pct:
-            pct = int(match_pct.group(1))
-            
-        # Limpieza básica del nombre
-        nombre_ej = re.sub(r"\d+\s*[xX*]\s*\d+", "", linea)
-        nombre_ej = re.sub(r"\d{2,3}\s*%", "", nombre_ej)
-        nombre_ej = re.sub(r"[@|#\-_]", " ", nombre_ej).strip()
-        
-        if not nombre_ej:
-            nombre_ej = f"Ejercicio {tipo}"
-
-        bloques_detectados.append({
-            "Tipo": tipo,
-            "Complejo / Ejercicios": nombre_ej,
-            "Series": series,
-            "Reps": reps,
-            "% 1RM": float(pct)
-        })
-        
-    if not bloques_detectados:
-        raise Exception("No se detectaron bloques legibles. Puedes ingresarlos manualmente abajo.")
-        
-    return bloques_detectados
-
-# -------------------------------------------------------------
 # MEMORIA Y ESTADOS DE SESIÓN
 # -------------------------------------------------------------
 if "lista_bloques" not in st.session_state:
@@ -211,23 +158,7 @@ if menu == "⚙️ 1. Esquema y PRs":
         st.session_state["cfg_pr_env"] = pr_env_in
 
     st.divider()
-    st.subheader("📷 Cargar desde Foto de Pizarra (Opcional)")
-    foto_pizarra = st.file_uploader("Sube una foto de la pizarra", type=["png", "jpg", "jpeg"])
-
-    if foto_pizarra:
-        if st.button("🤖 Leer Foto y Rellenar Esquema"):
-            with st.spinner("Leyendo pizarra con OCR..."):
-                try:
-                    bloques_extraidos = procesar_foto_ocr(foto_pizarra)
-                    st.session_state["lista_bloques"] = bloques_extraidos
-                    guardar_estado_disco("lista_bloques", bloques_extraidos)
-                    st.success("¡Pizarra leída! Puedes ajustar los bloques abajo.")
-                    st.rerun()
-                except Exception as e:
-                    st.warning(f"{e}")
-
-    st.divider()
-    st.subheader("➕ Agregar Ejercicio o Bloque Manualmente")
+    st.subheader("➕ Agregar Ejercicio o Bloque")
     
     with st.form("form_nuevo_bloque", clear_on_submit=True):
         f_tipo = st.selectbox("Tipo de Movimiento", ["Arranque", "Envión", "Fuerza"])
@@ -258,10 +189,10 @@ if menu == "⚙️ 1. Esquema y PRs":
                 st.warning("Escribe el nombre del ejercicio antes de agregar.")
 
     st.divider()
-    st.subheader("📋 Bloques Planificados para Hoy (Modificable)")
+    st.subheader("📋 Bloques Planificados para Hoy")
     
     if len(st.session_state["lista_bloques"]) == 0:
-        st.info("No hay bloques agregados todavía. Sube una foto o agrégalos con el formulario.")
+        st.info("No hay bloques agregados todavía. Agrega uno con el formulario de arriba.")
     else:
         df_bloques = pd.DataFrame(st.session_state["lista_bloques"])
         
