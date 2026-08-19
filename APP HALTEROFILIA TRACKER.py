@@ -106,7 +106,7 @@ def cargar_estado_disco(clave, valor_defecto):
     return valor_defecto
 
 # -------------------------------------------------------------
-# FUNCIONES DE EXPORTACIÓN ROBUSTAS (EXCEL Y PDF)
+# FUNCIONES DE EXPORTACIÓN (EXCEL Y PDF)
 # -------------------------------------------------------------
 def generar_excel(df, titulo_hoja="Entrenamiento"):
     output = io.BytesIO()
@@ -156,7 +156,6 @@ def generar_pdf(df, titulo="Reporte de Entrenamiento", subtitulo=""):
             pdf.cell(anchos[7], 6, obs, border=1)
             pdf.ln()
 
-    # Conversión explícita a bytes para Streamlit
     out = pdf.output()
     if isinstance(out, str):
         return out.encode("latin1")
@@ -464,10 +463,10 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
             st.rerun()
 
 # -------------------------------------------------------------
-# MÓDULO 3: DETALLE, EDICIÓN DE FECHAS Y DESCARGA HISTÓRICA
+# MÓDULO 3: DETALLE, EDICIÓN PROFUNDA, ELIMINACIÓN Y REASIGNACIÓN
 # -------------------------------------------------------------
 elif menu == "🔍 Detalle Diario":
-    st.title("📋 Detalle y Edición de Entrenamientos")
+    st.title("📋 Gestión y Edición de Entrenamientos")
     conn = get_db_connection()
     df_raw = pd.read_sql_query("SELECT * FROM intentos", conn)
     conn.close()
@@ -485,6 +484,7 @@ elif menu == "🔍 Detalle Diario":
         fecha_actual_sesion = df_sesion["fecha"].iloc[0]
         jornada_actual_sesion = df_sesion["jornada"].iloc[0]
 
+        # Métricas
         tot_movs = len(df_sesion)
         tot_val = len(df_sesion[df_sesion["resultado"] == "Completado"])
         tot_fal = len(df_sesion[df_sesion["resultado"] == "Falla"])
@@ -496,36 +496,107 @@ elif menu == "🔍 Detalle Diario":
         c3.metric("Fallas", tot_fal)
 
         st.write("---")
-        with st.expander("📅 Modificar la Fecha de este Entrenamiento"):
-            c_f1, c_f2 = st.columns([2, 1])
-            with c_f1:
-                nueva_fecha = st.date_input("Nueva fecha para esta sesión:", pd.to_datetime(fecha_actual_sesion).date())
-            with c_f2:
-                st.write("")
-                if st.button("🔄 Actualizar Fecha"):
+        
+        # 1. Herramientas Rápidas (Cambio de Día global, Mover Ejercicio puntual y Agregar Ejercicio Retroactivo)
+        col_h1, col_h2 = st.columns(2)
+        
+        with col_h1:
+            with st.expander("📅 Cambiar Fecha de la Sesión Completa"):
+                nueva_fecha_glob = st.date_input("Nueva fecha para toda la sesión:", pd.to_datetime(fecha_actual_sesion).date(), key="n_f_g")
+                if st.button("🔄 Aplicar a Toda la Sesión", key="btn_f_glob"):
                     conn = get_db_connection()
                     c = conn.cursor()
                     c.execute("""
                         UPDATE intentos 
                         SET fecha = ? 
                         WHERE fecha = ? AND jornada = ?
-                    """, (str(nueva_fecha), fecha_actual_sesion, jornada_actual_sesion))
+                    """, (str(nueva_fecha_glob), fecha_actual_sesion, jornada_actual_sesion))
                     conn.commit()
                     conn.close()
-                    st.success(f"Fecha cambiada a {nueva_fecha}")
+                    st.success(f"Sesión transferida al {nueva_fecha_glob}")
                     st.rerun()
 
-        st.subheader("✏️ Editar Intentos de esta Sesión")
+        with col_h2:
+            with st.expander("🚚 Mover un Ejercicio Específico a Otro Día"):
+                # Lista de intentos con formato legible
+                opciones_mover = {
+                    int(r["id"]): f"ID {r['id']} - {r['serie']} {r['movimiento']} ({r['peso']} kg)"
+                    for _, r in df_sesion.iterrows()
+                }
+                id_a_mover = st.selectbox("Selecciona el intento/ejercicio a transferir:", list(opciones_mover.keys()), format_func=lambda x: opciones_mover[x])
+                col_mv1, col_mv2 = st.columns(2)
+                with col_mv1:
+                    fecha_destino = st.date_input("Fecha de destino:", date.today(), key="f_mv_dest")
+                with col_mv2:
+                    jornada_destino = st.selectbox("Jornada de destino:", ["Sesión 1 (Mañana)", "Sesión 2 (Tarde)", "Sesión 3 (Extra)"], key="j_mv_dest")
+                
+                if st.button("🚀 Transferir Ejercicio Seleccionado"):
+                    conn = get_db_connection()
+                    c = conn.cursor()
+                    c.execute("""
+                        UPDATE intentos 
+                        SET fecha = ?, jornada = ? 
+                        WHERE id = ?
+                    """, (str(fecha_destino), jornada_destino, int(id_a_mover)))
+                    conn.commit()
+                    conn.close()
+                    st.success("¡Ejercicio transferido exitosamente a la otra fecha!")
+                    st.rerun()
+
+        with st.expander("➕ Añadir Ejercicio Retroactivo a Esta Sesión"):
+            with st.form("form_retroactivo"):
+                col_r1, col_r2, col_r3 = st.columns(3)
+                with col_r1:
+                    r_tipo = st.selectbox("Tipo", ["Arranque", "Envión", "Fuerza"], key="r_t")
+                    r_mov = st.text_input("Movimiento / Ejercicio", placeholder="Ej: Clásico", key="r_m")
+                with col_r2:
+                    r_serie = st.text_input("Serie", value="S1", key="r_s")
+                    r_rep = st.text_input("Repetición", value="Rep 1", key="r_r")
+                with col_r3:
+                    r_peso = st.number_input("Kilos", min_value=0.0, value=70.0, step=0.5, key="r_p")
+                    r_pct = st.number_input("% 1RM", min_value=10, max_value=150, value=80, key="r_pct")
+                
+                col_r4, col_r5 = st.columns([1, 2])
+                with col_r4:
+                    r_valido = st.checkbox("¿Válido?", value=True, key="r_val")
+                with col_r5:
+                    r_obs = st.text_input("Observación Técnica", key="r_obs")
+                
+                if st.form_submit_button("➕ Insertar en esta Sesión"):
+                    if r_mov.strip():
+                        res_retro = "Completado" if r_valido else "Falla"
+                        conn = get_db_connection()
+                        c = conn.cursor()
+                        pr_calc = float(cargar_estado_disco("pr_arr", 70.0)) if r_tipo == "Arranque" else float(cargar_estado_disco("pr_env", 90.0))
+                        c.execute("""
+                            INSERT INTO intentos (fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            fecha_actual_sesion, r_tipo, pr_calc, r_mov.strip(),
+                            r_serie, r_rep, r_mov.strip(), float(r_pct), float(r_peso),
+                            res_retro, r_obs, jornada_actual_sesion
+                        ))
+                        conn.commit()
+                        conn.close()
+                        st.success("¡Ejercicio insertado en la sesión!")
+                        st.rerun()
+                    else:
+                        st.warning("Escribe el nombre del movimiento.")
+
+        st.write("---")
+        st.subheader("✏️ Editor de Intentos (Modificar o Eliminar Filas)")
+        st.caption("💡 Para eliminar un intento, selecciónalo en la tabla y presiona la tecla Supr/Delete o el ícono de papelera; luego pulsa **Guardar Modificaciones**.")
+
         df_sesion["Válido (✔)"] = df_sesion["resultado"] == "Completado"
         columnas_visibles = ["id", "tipo_sesion", "serie", "repeticion", "movimiento", "pct_pr", "peso", "Válido (✔)", "observacion"]
         
         cfg_edicion = {
             "id": st.column_config.NumberColumn("ID", disabled=True),
-            "tipo_sesion": st.column_config.TextColumn("Tipo", disabled=True),
-            "serie": st.column_config.TextColumn("Serie", disabled=True),
-            "repeticion": st.column_config.TextColumn("Rep", disabled=True),
-            "movimiento": st.column_config.TextColumn("Movimiento", disabled=True),
-            "pct_pr": st.column_config.NumberColumn("% 1RM", format="%d%%", disabled=True),
+            "tipo_sesion": st.column_config.SelectboxColumn("Tipo", options=["Arranque", "Envión", "Fuerza"], required=True),
+            "serie": st.column_config.TextColumn("Serie"),
+            "repeticion": st.column_config.TextColumn("Rep"),
+            "movimiento": st.column_config.TextColumn("Movimiento", width="medium"),
+            "pct_pr": st.column_config.NumberColumn("% 1RM", format="%d%%"),
             "peso": st.column_config.NumberColumn("Peso (kg)", min_value=0.0, step=0.5),
             "Válido (✔)": st.column_config.CheckboxColumn("¿Válido?"),
             "observacion": st.column_config.TextColumn("Observación Técnica", width="large")
@@ -541,20 +612,46 @@ elif menu == "🔍 Detalle Diario":
 
         col_btn_edit, col_btn_del = st.columns(2)
         with col_btn_edit:
-            if st.button("💾 Guardar Modificaciones", type="primary"):
+            if st.button("💾 Guardar Modificaciones / Eliminar Filas", type="primary"):
                 conn = get_db_connection()
                 c = conn.cursor()
+                
+                # 1. Detectar filas eliminadas de la tabla
+                ids_anteriores = set(df_sesion["id"].tolist())
+                ids_actuales = set(df_editado["id"].dropna().astype(int).tolist())
+                ids_a_borrar = ids_anteriores - ids_actuales
+                
+                for id_borrar in ids_a_borrar:
+                    c.execute("DELETE FROM intentos WHERE id = ?", (int(id_borrar),))
+
+                # 2. Actualizar o insertar filas existentes
                 for _, r in df_editado.iterrows():
                     res = "Completado" if bool(r["Válido (✔)"]) else "Falla"
                     obs = str(r["observacion"]) if pd.notna(r["observacion"]) else ""
-                    c.execute("""
-                        UPDATE intentos 
-                        SET peso = ?, resultado = ?, observacion = ?
-                        WHERE id = ?
-                    """, (float(r["peso"]), res, obs, int(r["id"])))
+                    tipo_u = str(r["tipo_sesion"]) if pd.notna(r["tipo_sesion"]) else "Arranque"
+                    serie_u = str(r["serie"]) if pd.notna(r["serie"]) else "S1"
+                    rep_u = str(r["repeticion"]) if pd.notna(r["repeticion"]) else "Rep 1"
+                    mov_u = str(r["movimiento"]) if pd.notna(r["movimiento"]) else "Ejercicio"
+                    pct_u = float(r["pct_pr"]) if pd.notna(r["pct_pr"]) else 70.0
+                    peso_u = float(r["peso"]) if pd.notna(r["peso"]) else 0.0
+
+                    if pd.notna(r["id"]) and int(r["id"]) in ids_anteriores:
+                        c.execute("""
+                            UPDATE intentos 
+                            SET tipo_sesion = ?, serie = ?, repeticion = ?, movimiento = ?, 
+                                pct_pr = ?, peso = ?, resultado = ?, observacion = ?
+                            WHERE id = ?
+                        """, (tipo_u, serie_u, rep_u, mov_u, pct_u, peso_u, res, obs, int(r["id"])))
+                    else:
+                        pr_calc = float(cargar_estado_disco("pr_arr", 70.0)) if tipo_u == "Arranque" else float(cargar_estado_disco("pr_env", 90.0))
+                        c.execute("""
+                            INSERT INTO intentos (fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (fecha_actual_sesion, tipo_u, pr_calc, mov_u, serie_u, rep_u, mov_u, pct_u, peso_u, res, obs, jornada_actual_sesion))
+                
                 conn.commit()
                 conn.close()
-                st.success("✅ ¡Sesión actualizada correctamente!")
+                st.success("✅ ¡Cambios guardados y sincronizados correctamente!")
                 st.rerun()
 
         with col_btn_del:
@@ -564,7 +661,7 @@ elif menu == "🔍 Detalle Diario":
                 c.execute("DELETE FROM intentos WHERE fecha = ? AND jornada = ?", (fecha_actual_sesion, jornada_actual_sesion))
                 conn.commit()
                 conn.close()
-                st.warning(f"Sesión del día {fecha_actual_sesion} ({jornada_actual_sesion}) eliminada.")
+                st.warning(f"Sesión {fecha_actual_sesion} ({jornada_actual_sesion}) eliminada.")
                 st.rerun()
 
         st.write("---")
