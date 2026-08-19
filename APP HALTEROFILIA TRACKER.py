@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 # -------------------------------------------------------------
-# ESTILOS PARA EVITAR SALTOS DE PANTALLA
+# ESTILOS ANTI-SALTO Y DISEÑO MÓVIL
 # -------------------------------------------------------------
 st.markdown("""
     <style>
@@ -35,7 +35,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------
-# BASE DE DATOS Y TABLAS DE PERSISTENCIA
+# BASE DE DATOS Y PERSISTENCIA
 # -------------------------------------------------------------
 def get_db_connection():
     conn = sqlite3.connect("halterofilia.db", timeout=10)
@@ -45,7 +45,6 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
-    # Tabla de entrenamientos guardados finales
     c.execute("""
         CREATE TABLE IF NOT EXISTS intentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,7 +63,6 @@ def init_db():
             pct_pr REAL
         )
     """)
-    # Tabla de borrador persistente (para no perder datos si sales de la app)
     c.execute("""
         CREATE TABLE IF NOT EXISTS estado_borrador (
             clave TEXT PRIMARY KEY,
@@ -276,7 +274,6 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
             key="editor_matriz_final"
         )
         
-        # Auto-guardado en SQLite cada vez que cambias un dato en vivo
         st.session_state["matriz_activa"] = matriz_final
         guardar_estado_disco("matriz_activa", matriz_final.to_dict(orient="records"))
 
@@ -306,18 +303,17 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
             conn.commit()
             conn.close()
             
-            # Limpieza del borrador una vez guardado definitivamente
             st.session_state["matriz_activa"] = pd.DataFrame()
             guardar_estado_disco("matriz_activa", [])
-            st.success("✅ ¡Entrenamiento guardado con éxito en el historial permanente!")
+            st.success("✅ ¡Entrenamiento guardado con éxito!")
             st.session_state["menu_nav"] = "🔍 Detalle Diario"
             st.rerun()
 
 # -------------------------------------------------------------
-# MÓDULO 3: DETALLE DIARIO
+# MÓDULO 3: DETALLE Y EDICIÓN DE ENTRENAMIENTOS ANTERIORES
 # -------------------------------------------------------------
 elif menu == "🔍 Detalle Diario":
-    st.title("📋 Resumen Diario por Movimiento")
+    st.title("📋 Detalle y Edición de Entrenamientos")
     conn = get_db_connection()
     df_raw = pd.read_sql_query("SELECT * FROM intentos", conn)
     conn.close()
@@ -326,9 +322,10 @@ elif menu == "🔍 Detalle Diario":
         st.info("Aún no tienes entrenamientos registrados.")
     else:
         fechas = sorted(df_raw["fecha"].dropna().unique(), reverse=True)
-        fecha_sel = st.selectbox("Selecciona la fecha", fechas)
-        df_dia = df_raw[df_raw["fecha"] == fecha_sel]
+        fecha_sel = st.selectbox("Selecciona la fecha a consultar o editar:", fechas)
+        df_dia = df_raw[df_raw["fecha"] == fecha_sel].copy()
 
+        # Métricas calculadas
         tot_movs = len(df_dia)
         tot_val = len(df_dia[df_dia["resultado"] == "Completado"])
         tot_fal = len(df_dia[df_dia["resultado"] == "Falla"])
@@ -339,13 +336,60 @@ elif menu == "🔍 Detalle Diario":
         c2.metric("Válidos", tot_val)
         c3.metric("Fallas", tot_fal)
 
-        st.dataframe(
-            df_dia[["tipo_sesion", "serie", "repeticion", "movimiento", "peso", "pct_pr", "resultado", "observacion"]].rename(columns={
-                "tipo_sesion": "Tipo", "serie": "Serie", "repeticion": "Rep", "movimiento": "Movimiento",
-                "peso": "Kg", "pct_pr": "%", "resultado": "Estado", "observacion": "Observación"
-            }),
-            use_container_width=True
+        st.write("---")
+        st.subheader("✏️ Editar Intentos de este Día")
+        st.caption("Puedes modificar los kilos, cambiar si fue válido o escribir notas técnicas directamente en la tabla.")
+
+        df_dia["Válido (✔)"] = df_dia["resultado"] == "Completado"
+        columnas_visibles = ["id", "tipo_sesion", "serie", "repeticion", "movimiento", "pct_pr", "peso", "Válido (✔)", "observacion"]
+        
+        cfg_edicion = {
+            "id": st.column_config.NumberColumn("ID", disabled=True),
+            "tipo_sesion": st.column_config.TextColumn("Tipo", disabled=True),
+            "serie": st.column_config.TextColumn("Serie", disabled=True),
+            "repeticion": st.column_config.TextColumn("Rep", disabled=True),
+            "movimiento": st.column_config.TextColumn("Movimiento", disabled=True),
+            "pct_pr": st.column_config.NumberColumn("% 1RM", format="%d%%", disabled=True),
+            "peso": st.column_config.NumberColumn("Peso (kg)", min_value=0.0, step=0.5),
+            "Válido (✔)": st.column_config.CheckboxColumn("¿Válido?"),
+            "observacion": st.column_config.TextColumn("Observación Técnica", width="large")
+        }
+
+        df_editado = st.data_editor(
+            df_dia[columnas_visibles],
+            num_rows="fixed",
+            use_container_width=True,
+            column_config=cfg_edicion,
+            key=f"editor_historial_{fecha_sel}"
         )
+
+        col_btn_edit, col_btn_del = st.columns(2)
+        with col_btn_edit:
+            if st.button("💾 Guardar Modificaciones", type="primary"):
+                conn = get_db_connection()
+                c = conn.cursor()
+                for _, r in df_editado.iterrows():
+                    res = "Completado" if bool(r["Válido (✔)"]) else "Falla"
+                    obs = str(r["observacion"]) if pd.notna(r["observacion"]) else ""
+                    c.execute("""
+                        UPDATE intentos 
+                        SET peso = ?, resultado = ?, observacion = ?
+                        WHERE id = ?
+                    """, (float(r["peso"]), res, obs, int(r["id"])))
+                conn.commit()
+                conn.close()
+                st.success("✅ ¡Entrenamiento anterior actualizado correctamente!")
+                st.rerun()
+
+        with col_btn_del:
+            if st.button("🗑️ Eliminar Entrenamiento de este Día"):
+                conn = get_db_connection()
+                c = conn.cursor()
+                c.execute("DELETE FROM intentos WHERE fecha = ?", (fecha_sel,))
+                conn.commit()
+                conn.close()
+                st.warning(f"Entrenamiento del día {fecha_sel} eliminado.")
+                st.rerun()
 
 # -------------------------------------------------------------
 # MÓDULO 4: DASHBOARD SEMESTRAL
