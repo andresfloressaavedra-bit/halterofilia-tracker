@@ -97,28 +97,35 @@ def cargar_estado_disco(clave, valor_defecto):
     return valor_defecto
 
 # -------------------------------------------------------------
-# MOTOR DE LECTURA DE PIZARRA
+# MOTOR DE LECTURA DE PIZARRA (CONEXIÓN REST ROBUSTA)
 # -------------------------------------------------------------
 def procesar_foto_pizarra(image_file, api_key):
+    if not api_key:
+        api_key = "AQ.Ab8RN6J34-hPjlTscx_eYVUIrkZT9Q7Wjzrr1oofSaEwriqZFw"
+
     image_bytes = image_file.getvalue()
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
     mime_type = image_file.type if hasattr(image_file, "type") and image_file.type else "image/jpeg"
 
     prompt = """
     Extrae la lista de ejercicios de halterofilia de la imagen.
-    Devuelve ÚNICAMENTE un JSON con esta estructura exacta:
+    Devuelve ÚNICAMENTE un array JSON válido con esta estructura exacta:
     [
       {
-        "Tipo": "Arranque" | "Envión" | "Fuerza",
-        "Complejo / Ejercicios": "nombre del combo (ej: Jalón c/p + Clásico)",
-        "Series": numero_entero,
-        "Reps": numero_entero,
-        "% 1RM": numero_entero
+        "Tipo": "Arranque",
+        "Complejo / Ejercicios": "Jalón c/p + Clásico",
+        "Series": 2,
+        "Reps": 1,
+        "% 1RM": 80
       }
     ]
     """
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": api_key
+    }
     payload = {
         "contents": [{
             "parts": [
@@ -128,9 +135,9 @@ def procesar_foto_pizarra(image_file, api_key):
         }]
     }
     
-    res = requests.post(url, json=payload, timeout=30)
+    res = requests.post(url, headers=headers, json=payload, timeout=35)
     if res.status_code != 200:
-        raise Exception(f"Error de lectura ({res.status_code}). Puedes ingresar los bloques manualmente abajo.")
+        raise Exception(f"Error de Google ({res.status_code}): {res.text}")
     
     data_raw = res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
     if "```json" in data_raw:
@@ -138,10 +145,36 @@ def procesar_foto_pizarra(image_file, api_key):
     elif "```" in data_raw:
         data_raw = data_raw.split("```")[1].split("```")[0].strip()
         
-    return json.loads(data_raw)
+    data = json.loads(data_raw)
+    
+    # Manejar respuestas envueltas en diccionarios
+    if isinstance(data, dict):
+        for k in data:
+            if isinstance(data[k], list):
+                data = data[k]
+                break
+        if isinstance(data, dict):
+            data = [data]
+
+    resultado_limpio = []
+    for item in data:
+        if isinstance(item, dict):
+            tipo = item.get("Tipo", item.get("tipo", "Arranque"))
+            ejercicio = item.get("Complejo / Ejercicios", item.get("Complejo", item.get("ejercicio", "Ejercicio")))
+            series = int(item.get("Series", item.get("series", 1)))
+            reps = int(item.get("Reps", item.get("reps", item.get("repeticiones", 1))))
+            pct = float(item.get("% 1RM", item.get("pct", item.get("porcentaje", 70))))
+            resultado_limpio.append({
+                "Tipo": tipo if tipo in ["Arranque", "Envión", "Fuerza"] else "Arranque",
+                "Complejo / Ejercicios": str(ejercicio),
+                "Series": series,
+                "Reps": reps,
+                "% 1RM": pct
+            })
+    return resultado_limpio
 
 # -------------------------------------------------------------
-# MEMORIA Y ESTADO
+# MEMORIA Y ESTADOS DE SESIÓN
 # -------------------------------------------------------------
 if "lista_bloques" not in st.session_state:
     bloques_defecto = [
@@ -207,7 +240,6 @@ if menu == "⚙️ 1. Esquema y PRs":
     st.subheader("📷 Cargar desde Foto de Pizarra (Opcional)")
     foto_pizarra = st.file_uploader("Sube una foto de la pizarra", type=["png", "jpg", "jpeg"])
     
-    # Campo opcional por si tienes clave de API en Secrets o manual
     api_key_guardada = st.secrets.get("GEMINI_API_KEY", "")
 
     if foto_pizarra:
@@ -261,7 +293,6 @@ if menu == "⚙️ 1. Esquema y PRs":
     else:
         df_bloques = pd.DataFrame(st.session_state["lista_bloques"])
         
-        # Tabla interactiva para ajustar rápidamente lo que leyó la foto
         cfg_bloques = {
             "Tipo": st.column_config.SelectboxColumn("Tipo", options=["Arranque", "Envión", "Fuerza"], required=True),
             "Complejo / Ejercicios": st.column_config.TextColumn("Complejo / Ejercicios", width="large", required=True),
@@ -278,7 +309,6 @@ if menu == "⚙️ 1. Esquema y PRs":
             key="editor_bloques_esquema"
         )
         
-        # Auto-guardado de los ajustes hechos en la tabla
         st.session_state["lista_bloques"] = bloques_editados.to_dict(orient="records")
         guardar_estado_disco("lista_bloques", st.session_state["lista_bloques"])
 
