@@ -3,7 +3,9 @@ import pandas as pd
 import sqlite3
 import plotly.express as px
 import json
+import io
 from datetime import date
+from fpdf import FPDF
 
 st.set_page_config(
     page_title="Tracker Halterofilia Pro", 
@@ -24,7 +26,7 @@ st.markdown("""
             padding-top: 1rem !important;
             padding-bottom: 3rem !important;
         }
-        .stButton button {
+        .stButton button, .stDownloadButton button {
             width: 100%;
             height: 3rem;
             font-size: 1.05rem !important;
@@ -60,9 +62,19 @@ def init_db():
             bloque_combo TEXT,
             repeticion TEXT,
             movimiento TEXT,
-            pct_pr REAL
+            pct_pr REAL,
+            jornada TEXT DEFAULT 'Sesión 1'
         )
     """)
+    # Migración en caso de que falte la columna jornada
+    c.execute("PRAGMA table_info(intentos)")
+    cols = [col[1] for col in c.fetchall()]
+    if "jornada" not in cols:
+        try:
+            c.execute("ALTER TABLE intentos ADD COLUMN jornada TEXT DEFAULT 'Sesión 1'")
+        except Exception:
+            pass
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS estado_borrador (
             clave TEXT PRIMARY KEY,
@@ -93,6 +105,60 @@ def cargar_estado_disco(clave, valor_defecto):
         except Exception:
             return valor_defecto
     return valor_defecto
+
+# -------------------------------------------------------------
+# FUNCIONES DE EXPORTACIÓN (EXCEL Y PDF)
+# -------------------------------------------------------------
+def generar_excel(df, titulo_hoja="Entrenamiento"):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name=titulo_hoja[:30], index=False)
+    return output.getvalue()
+
+def generar_pdf(df, titulo="Reporte de Entrenamiento", subtitulo=""):
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=12)
+    pdf.add_page()
+    
+    # Encabezado
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 8, titulo, ln=True, align="C")
+    if subtitulo:
+        pdf.set_font("Helvetica", "I", 10)
+        pdf.cell(0, 6, subtitulo, ln=True, align="C")
+    pdf.ln(4)
+    
+    # Tabla
+    pdf.set_font("Helvetica", "B", 8)
+    columnas = ["Tipo", "Serie", "Rep", "Movimiento", "Kg", "%", "Estado", "Observación"]
+    anchos = [20, 14, 14, 45, 14, 14, 20, 48]
+    
+    for col, ancho in zip(columnas, anchos):
+        pdf.cell(ancho, 7, col, border=1, align="C")
+    pdf.ln()
+    
+    pdf.set_font("Helvetica", "", 8)
+    for _, fila in df.iterrows():
+        tipo = str(fila.get("Tipo", fila.get("tipo_sesion", "")))[:10]
+        serie = str(fila.get("Serie", fila.get("serie", "")))[:6]
+        rep = str(fila.get("Rep", fila.get("repeticion", "")))[:6]
+        mov = str(fila.get("Movimiento", fila.get("movimiento", "")))[:24]
+        kg = str(fila.get("Carga (kg)", fila.get("peso", "")))[:6]
+        pct = str(fila.get("% 1RM", fila.get("pct_pr", "")))[:6]
+        res = "Válido" if str(fila.get("Válido (✔)", fila.get("resultado", ""))) in ["True", "Completado"] else "Falla"
+        obs = str(fila.get("Observación Técnica", fila.get("observacion", "")))[:26]
+
+        pdf.cell(anchos[0], 6, tipo, border=1, align="C")
+        pdf.cell(anchos[1], 6, serie, border=1, align="C")
+        pdf.cell(anchos[2], 6, rep, border=1, align="C")
+        pdf.cell(anchos[3], 6, mov, border=1)
+        pdf.cell(anchos[4], 6, kg, border=1, align="C")
+        pdf.cell(anchos[5], 6, pct, border=1, align="C")
+        pdf.cell(anchos[6], 6, res, border=1, align="C")
+        pdf.cell(anchos[7], 6, obs, border=1)
+        pdf.ln()
+
+    return pdf.output()
 
 # -------------------------------------------------------------
 # MEMORIA Y ESTADOS DE SESIÓN
@@ -142,20 +208,23 @@ if menu == "⚙️ 1. Esquema y PRs":
     val_pr_arr = float(cargar_estado_disco("pr_arr", 70.0))
     val_pr_env = float(cargar_estado_disco("pr_env", 90.0))
     
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.session_state["cfg_fecha"] = st.date_input("Fecha", date.today())
+    c1, c2, c3 = st.columns([1.2, 1.2, 1.2])
+    with c1:
+        st.session_state["cfg_fecha"] = st.date_input("Fecha de Sesión", date.today())
         pr_arr_in = st.number_input("PR Arranque (kg)", min_value=1.0, value=val_pr_arr, step=1.0)
         if pr_arr_in != val_pr_arr:
             guardar_estado_disco("pr_arr", pr_arr_in)
         st.session_state["cfg_pr_arr"] = pr_arr_in
 
-    with col_b:
-        st.session_state["cfg_enfoque"] = st.selectbox("Enfoque General", ["Arranque + Envión", "Arranque", "Envión", "Fuerza"], index=0)
+    with c2:
+        st.session_state["cfg_jornada"] = st.selectbox("Sesión / Turno", ["Sesión 1 (Mañana)", "Sesión 2 (Tarde)", "Sesión 3 (Extra)"], index=0)
         pr_env_in = st.number_input("PR Envión (kg)", min_value=1.0, value=val_pr_env, step=1.0)
         if pr_env_in != val_pr_env:
             guardar_estado_disco("pr_env", pr_env_in)
         st.session_state["cfg_pr_env"] = pr_env_in
+
+    with c3:
+        st.session_state["cfg_enfoque"] = st.selectbox("Enfoque General", ["Arranque + Envión", "Arranque", "Envión", "Fuerza"], index=0)
 
     st.divider()
     st.subheader("➕ Agregar Ejercicio o Bloque")
@@ -189,10 +258,10 @@ if menu == "⚙️ 1. Esquema y PRs":
                 st.warning("Escribe el nombre del ejercicio antes de agregar.")
 
     st.divider()
-    st.subheader("📋 Bloques Planificados para Hoy")
+    st.subheader("📋 Bloques Planificados para Esta Sesión")
     
     if len(st.session_state["lista_bloques"]) == 0:
-        st.info("No hay bloques agregados todavía. Agrega uno con el formulario de arriba.")
+        st.info("No hay bloques agregados todavía. Usa el formulario de arriba.")
     else:
         df_bloques = pd.DataFrame(st.session_state["lista_bloques"])
         
@@ -264,10 +333,10 @@ if menu == "⚙️ 1. Esquema y PRs":
             st.rerun()
 
 # -------------------------------------------------------------
-# MÓDULO 2: REGISTRO EN VIVO
+# MÓDULO 2: REGISTRO EN VIVO Y DESCARGA
 # -------------------------------------------------------------
 elif menu == "🏋️‍♂️ 2. Registro en Vivo":
-    st.title("🏋️‍♂️ Registro de Levantamientos")
+    st.title("🏋️‍♂️ Registro de Levantamientos en Vivo")
     
     if st.session_state["matriz_activa"].empty:
         st.info("👈 Primero ve a **'1. Esquema y PRs'** en la barra lateral y presiona **'Generar Matriz'**.")
@@ -295,11 +364,35 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
         st.session_state["matriz_activa"] = matriz_final
         guardar_estado_disco("matriz_activa", matriz_final.to_dict(orient="records"))
 
+        st.write("---")
+        st.write("**Exportar Planilla de Entrenamiento:**")
+        col_exp1, col_exp2 = st.columns(2)
+        
+        fecha_act = str(st.session_state.get("cfg_fecha", date.today()))
+        jornada_act = str(st.session_state.get("cfg_jornada", "Sesión 1"))
+
+        with col_exp1:
+            excel_bytes = generar_excel(matriz_final, f"Entrenamiento_{fecha_act}")
+            st.download_button(
+                label="📥 Descargar Planilla Excel (.xlsx)",
+                data=excel_bytes,
+                file_name=f"Entrenamiento_{fecha_act}_{jornada_act}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+        with col_exp2:
+            pdf_bytes = generar_pdf(matriz_final, f"Planilla: {fecha_act}", f"Jornada: {jornada_act}")
+            st.download_button(
+                label="📄 Descargar Planilla PDF (.pdf)",
+                data=pdf_bytes,
+                file_name=f"Entrenamiento_{fecha_act}_{jornada_act}.pdf",
+                mime="application/pdf"
+            )
+
         st.write("")
         if st.button("💾 Guardar Entrenamiento Completo", type="primary"):
             conn = get_db_connection()
             c = conn.cursor()
-            fecha_guardar = str(st.session_state.get("cfg_fecha", date.today()))
             pr_arr_g = float(cargar_estado_disco("pr_arr", 70.0))
             pr_env_g = float(cargar_estado_disco("pr_env", 90.0))
 
@@ -310,25 +403,25 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
                 obs = str(r["Observación Técnica"]) if pd.notna(r["Observación Técnica"]) else ""
                 
                 c.execute("""
-                    INSERT INTO intentos (fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO intentos (fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    fecha_guardar, str(r["Tipo"]), float(pr_base), str(r["Bloque"]),
+                    fecha_act, str(r["Tipo"]), float(pr_base), str(r["Bloque"]),
                     str(r["Serie"]), str(r["Rep"]), str(r["Movimiento"]),
                     float(str(r["% 1RM"]).replace("%", "")),
-                    float(r["Carga (kg)"]), res, obs
+                    float(r["Carga (kg)"]), res, obs, jornada_act
                 ))
             conn.commit()
             conn.close()
             
             st.session_state["matriz_activa"] = pd.DataFrame()
             guardar_estado_disco("matriz_activa", [])
-            st.success("✅ ¡Entrenamiento guardado con éxito!")
+            st.success(f"✅ ¡Entrenamiento guardado ({jornada_act}) con éxito!")
             st.session_state["menu_nav"] = "🔍 Detalle Diario"
             st.rerun()
 
 # -------------------------------------------------------------
-# MÓDULO 3: DETALLE Y EDICIÓN DE ENTRENAMIENTOS ANTERIORES
+# MÓDULO 3: DETALLE, EDICIÓN DE FECHAS Y DESCARGA HISTÓRICA
 # -------------------------------------------------------------
 elif menu == "🔍 Detalle Diario":
     st.title("📋 Detalle y Edición de Entrenamientos")
@@ -339,25 +432,51 @@ elif menu == "🔍 Detalle Diario":
     if df_raw.empty:
         st.info("Aún no tienes entrenamientos registrados.")
     else:
-        fechas = sorted(df_raw["fecha"].dropna().unique(), reverse=True)
-        fecha_sel = st.selectbox("Selecciona la fecha a consultar o editar:", fechas)
-        df_dia = df_raw[df_raw["fecha"] == fecha_sel].copy()
+        # Manejo de múltiples entrenamientos por fecha mediante (Fecha + Jornada)
+        df_raw["jornada"] = df_raw["jornada"].fillna("Sesión 1")
+        df_raw["sesion_id"] = df_raw["fecha"] + " | " + df_raw["jornada"]
+        
+        sesiones_disp = sorted(df_raw["sesion_id"].unique(), reverse=True)
+        sesion_sel = st.selectbox("Selecciona la sesión a consultar o editar:", sesiones_disp)
+        
+        df_sesion = df_raw[df_raw["sesion_id"] == sesion_sel].copy()
+        fecha_actual_sesion = df_sesion["fecha"].iloc[0]
+        jornada_actual_sesion = df_sesion["jornada"].iloc[0]
 
-        tot_movs = len(df_dia)
-        tot_val = len(df_dia[df_dia["resultado"] == "Completado"])
-        tot_fal = len(df_dia[df_dia["resultado"] == "Falla"])
+        # Métricas
+        tot_movs = len(df_sesion)
+        tot_val = len(df_sesion[df_sesion["resultado"] == "Completado"])
+        tot_fal = len(df_sesion[df_sesion["resultado"] == "Falla"])
         pct_efectividad = (tot_val / tot_movs * 100) if tot_movs > 0 else 0
 
         c1, c2, c3 = st.columns(3)
-        c1.metric("Efectividad Global", f"{pct_efectividad:.1f}%")
+        c1.metric("Efectividad", f"{pct_efectividad:.1f}%")
         c2.metric("Válidos", tot_val)
         c3.metric("Fallas", tot_fal)
 
+        # Modificación de Fecha Histórica
         st.write("---")
-        st.subheader("✏️ Editar Intentos de este Día")
-        st.caption("Modifica kilos, resultados u observaciones directamente en la tabla.")
+        with st.expander("📅 Modificar la Fecha de este Entrenamiento"):
+            c_f1, c_f2 = st.columns([2, 1])
+            with c_f1:
+                nueva_fecha = st.date_input("Nueva fecha para esta sesión:", pd.to_datetime(fecha_actual_sesion).date())
+            with c_f2:
+                st.write("")
+                if st.button("🔄 Actualizar Fecha"):
+                    conn = get_db_connection()
+                    c = conn.cursor()
+                    c.execute("""
+                        UPDATE intentos 
+                        SET fecha = ? 
+                        WHERE fecha = ? AND jornada = ?
+                    """, (str(nueva_fecha), fecha_actual_sesion, jornada_actual_sesion))
+                    conn.commit()
+                    conn.close()
+                    st.success(f"Fecha cambiada a {nueva_fecha}")
+                    st.rerun()
 
-        df_dia["Válido (✔)"] = df_dia["resultado"] == "Completado"
+        st.subheader("✏️ Editar Intentos de esta Sesión")
+        df_sesion["Válido (✔)"] = df_sesion["resultado"] == "Completado"
         columnas_visibles = ["id", "tipo_sesion", "serie", "repeticion", "movimiento", "pct_pr", "peso", "Válido (✔)", "observacion"]
         
         cfg_edicion = {
@@ -373,11 +492,11 @@ elif menu == "🔍 Detalle Diario":
         }
 
         df_editado = st.data_editor(
-            df_dia[columnas_visibles],
+            df_sesion[columnas_visibles],
             num_rows="fixed",
             use_container_width=True,
             column_config=cfg_edicion,
-            key=f"editor_historial_{fecha_sel}"
+            key=f"editor_historial_{sesion_sel}"
         )
 
         col_btn_edit, col_btn_del = st.columns(2)
@@ -395,18 +514,37 @@ elif menu == "🔍 Detalle Diario":
                     """, (float(r["peso"]), res, obs, int(r["id"])))
                 conn.commit()
                 conn.close()
-                st.success("✅ ¡Entrenamiento actualizado correctamente!")
+                st.success("✅ ¡Sesión actualizada correctamente!")
                 st.rerun()
 
         with col_btn_del:
-            if st.button("🗑️ Eliminar Entrenamiento de este Día"):
+            if st.button("🗑️ Eliminar Esta Sesión Completa"):
                 conn = get_db_connection()
                 c = conn.cursor()
-                c.execute("DELETE FROM intentos WHERE fecha = ?", (fecha_sel,))
+                c.execute("DELETE FROM intentos WHERE fecha = ? AND jornada = ?", (fecha_actual_sesion, jornada_actual_sesion))
                 conn.commit()
                 conn.close()
-                st.warning(f"Entrenamiento del día {fecha_sel} eliminado.")
+                st.warning(f"Sesión del día {fecha_actual_sesion} ({jornada_actual_sesion}) eliminada.")
                 st.rerun()
+
+        st.write("---")
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            excel_hist = generar_excel(df_sesion[columnas_visibles], f"{fecha_actual_sesion}")
+            st.download_button(
+                label="📥 Descargar Sesión en Excel (.xlsx)",
+                data=excel_hist,
+                file_name=f"Historial_{fecha_actual_sesion}_{jornada_actual_sesion}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        with col_d2:
+            pdf_hist = generar_pdf(df_sesion[columnas_visibles], f"Historial: {fecha_actual_sesion}", f"Jornada: {jornada_actual_sesion}")
+            st.download_button(
+                label="📄 Descargar Sesión en PDF (.pdf)",
+                data=pdf_hist,
+                file_name=f"Historial_{fecha_actual_sesion}_{jornada_actual_sesion}.pdf",
+                mime="application/pdf"
+            )
 
 # -------------------------------------------------------------
 # MÓDULO 4: DASHBOARD SEMESTRAL
