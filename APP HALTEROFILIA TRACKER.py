@@ -106,7 +106,7 @@ def cargar_estado_disco(clave, valor_defecto):
     return valor_defecto
 
 # -------------------------------------------------------------
-# PROCESADOR INTELIGENTE DE EXCEL
+# PROCESADOR DE EXCEL PARA IMPORTACIÓN
 # -------------------------------------------------------------
 def generar_plantilla_excel():
     output = io.BytesIO()
@@ -142,7 +142,6 @@ def procesar_excel_importado(archivo_excel):
             columnas_map[col] = "Observación Técnica"
             
     df_in = df_in.rename(columns=columnas_map)
-    
     filas_estandarizadas = []
     for _, r in df_in.iterrows():
         tipo = str(r.get("Tipo", "Arranque")).strip()
@@ -178,7 +177,7 @@ def procesar_excel_importado(archivo_excel):
     return pd.DataFrame(filas_estandarizadas)
 
 # -------------------------------------------------------------
-# EXPORTACIÓN (EXCEL Y PDF)
+# EXPORTACIONES DIARIAS Y SEMESTRALES (EXCEL Y PDF)
 # -------------------------------------------------------------
 def generar_dashboard_excel(df, fecha_str, jornada_str):
     output = io.BytesIO()
@@ -311,6 +310,157 @@ def generar_dashboard_pdf(df, fecha_str, jornada_str):
         pdf.cell(anchos[5], 5.5, pct, border=1, align="C")
         pdf.cell(anchos[6], 5.5, res, border=1, align="C")
         pdf.cell(anchos[7], 5.5, obs, border=1)
+        pdf.ln()
+
+    out = pdf.output()
+    if isinstance(out, str):
+        return out.encode("latin1")
+    return bytes(out)
+
+def generar_semestral_excel(df_all):
+    output = io.BytesIO()
+    df_all["is_comp"] = df_all["resultado"] == "Completado"
+    
+    # 1. Resumen Diario Consolidado
+    df_diario = df_all.groupby(["fecha", "jornada"]).agg(
+        Total_Movs=("id", "count"),
+        Validos=("is_comp", "sum"),
+        Tonelaje_Kg=("peso", lambda x: x[df_all.loc[x.index, "is_comp"]].sum())
+    ).reset_index()
+    df_diario["Fallas"] = df_diario["Total_Movs"] - df_diario["Validos"]
+    df_diario["% Efectividad"] = (df_diario["Validos"] / df_diario["Total_Movs"] * 100).round(1)
+
+    # 2. Desglose por Ejercicio Semestral
+    df_ejercicios = df_all.groupby("movimiento").agg(
+        Total_Intentos=("id", "count"),
+        Validos=("is_comp", "sum"),
+        Max_Kg=("peso", "max"),
+        Prom_Kg=("peso", "mean")
+    ).reset_index()
+    df_ejercicios["% Éxito"] = (df_ejercicios["Validos"] / df_ejercicios["Total_Intentos"] * 100).round(1)
+    df_ejercicios["Prom_Kg"] = df_ejercicios["Prom_Kg"].round(1)
+
+    # 3. Métricas Globales
+    tot_movs = len(df_all)
+    tot_val = int(df_all["is_comp"].sum())
+    tot_fal = tot_movs - tot_val
+    pct_global = (tot_val / tot_movs * 100) if tot_movs > 0 else 0
+    tonelaje_global = df_all[df_all["is_comp"]]["peso"].sum()
+
+    df_kpi_sem = pd.DataFrame([
+        {"Métrica": "Período", "Valor": "Histórico Semestral"},
+        {"Métrica": "Total Sesiones Registradas", "Valor": len(df_diario)},
+        {"Métrica": "Efectividad Global (%)", "Valor": f"{pct_global:.1f}%"},
+        {"Métrica": "Total Levantamientos Válidos", "Valor": tot_val},
+        {"Métrica": "Total Fallas Técnicas", "Valor": tot_fal},
+        {"Métrica": "Volumen Total Intentos", "Valor": tot_movs},
+        {"Métrica": "Tonelaje Total Acumulado (kg)", "Valor": f"{tonelaje_global:.1f} kg"}
+    ])
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_kpi_sem.to_excel(writer, sheet_name="KPIs Semestre", index=False)
+        df_diario.to_excel(writer, sheet_name="Resumen Diario", index=False)
+        df_ejercicios.to_excel(writer, sheet_name="Rendimiento Ejercicios", index=False)
+        df_all.to_excel(writer, sheet_name="Todos los Intentos", index=False)
+        
+    return output.getvalue()
+
+def generar_semestral_pdf(df_all):
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=12)
+    pdf.add_page()
+    
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 8, "DASHBOARD SEMESTRAL DE HALTEROFILIA", ln=True, align="C")
+    pdf.set_font("Helvetica", "I", 10)
+    pdf.cell(0, 5, f"Reporte Consolidado de Rendimiento y Progresión", ln=True, align="C")
+    pdf.ln(4)
+
+    df_all["is_comp"] = df_all["resultado"] == "Completado"
+    tot_movs = len(df_all)
+    tot_val = int(df_all["is_comp"].sum())
+    tot_fal = tot_movs - tot_val
+    pct_global = (tot_val / tot_movs * 100) if tot_movs > 0 else 0
+    tonelaje_global = df_all[df_all["is_comp"]]["peso"].sum()
+
+    # 1. KPIs Globales
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 6, "1. RESUMEN GLOBAL ACUMULADO", ln=True)
+    pdf.set_font("Helvetica", "", 9)
+    
+    ancho_kpi = 47.5
+    pdf.set_fill_color(240, 240, 240)
+    pdf.cell(ancho_kpi, 6, "Efectividad Global", border=1, align="C", fill=True)
+    pdf.cell(ancho_kpi, 6, "Válidos / Fallas", border=1, align="C", fill=True)
+    pdf.cell(ancho_kpi, 6, "Total Movs", border=1, align="C", fill=True)
+    pdf.cell(ancho_kpi, 6, "Tonelaje Acumulado", border=1, align="C", fill=True)
+    pdf.ln()
+
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(ancho_kpi, 8, f"{pct_global:.1f}%", border=1, align="C")
+    pdf.cell(ancho_kpi, 8, f"{tot_val} / {tot_fal}", border=1, align="C")
+    pdf.cell(ancho_kpi, 8, f"{tot_movs}", border=1, align="C")
+    pdf.cell(ancho_kpi, 8, f"{tonelaje_global:.1f} kg", border=1, align="C")
+    pdf.ln(10)
+
+    # 2. Resumen Diario Consolidado
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 6, "2. EVOLUCIÓN Y RESUMEN DIARIO", ln=True)
+    
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.cell(35, 6, "Fecha", border=1, align="C", fill=True)
+    pdf.cell(45, 6, "Jornada", border=1, align="C", fill=True)
+    pdf.cell(25, 6, "Total Movs", border=1, align="C", fill=True)
+    pdf.cell(25, 6, "Válidos", border=1, align="C", fill=True)
+    pdf.cell(30, 6, "% Efectividad", border=1, align="C", fill=True)
+    pdf.cell(30, 6, "Tonelaje (kg)", border=1, align="C", fill=True)
+    pdf.ln()
+
+    df_diario = df_all.groupby(["fecha", "jornada"]).agg(
+        Total_Movs=("id", "count"),
+        Validos=("is_comp", "sum"),
+        Tonelaje_Kg=("peso", lambda x: x[df_all.loc[x.index, "is_comp"]].sum())
+    ).reset_index()
+
+    pdf.set_font("Helvetica", "", 8)
+    for _, r in df_diario.iterrows():
+        pct_dia = (r["Validos"] / r["Total_Movs"] * 100) if r["Total_Movs"] > 0 else 0
+        pdf.cell(35, 6, str(r["fecha"]), border=1, align="C")
+        pdf.cell(45, 6, str(r["jornada"])[:22], border=1)
+        pdf.cell(25, 6, str(r["Total_Movs"]), border=1, align="C")
+        pdf.cell(25, 6, str(r["Validos"]), border=1, align="C")
+        pdf.cell(30, 6, f"{pct_dia:.1f}%", border=1, align="C")
+        pdf.cell(30, 6, f"{r['Tonelaje_Kg']:.1f} kg", border=1, align="C")
+        pdf.ln()
+
+    pdf.ln(6)
+
+    # 3. Rendimiento por Ejercicio Semestral
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 6, "3. RENDIMIENTO ACUMULADO POR EJERCICIO", ln=True)
+    
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.cell(65, 6, "Ejercicio", border=1, align="C", fill=True)
+    pdf.cell(30, 6, "Total Intentos", border=1, align="C", fill=True)
+    pdf.cell(30, 6, "Válidos", border=1, align="C", fill=True)
+    pdf.cell(30, 6, "Carga Máx (kg)", border=1, align="C", fill=True)
+    pdf.cell(35, 6, "% Éxito", border=1, align="C", fill=True)
+    pdf.ln()
+
+    df_ejercicios = df_all.groupby("movimiento").agg(
+        Total_Intentos=("id", "count"),
+        Validos=("is_comp", "sum"),
+        Max_Kg=("peso", "max")
+    ).reset_index()
+
+    pdf.set_font("Helvetica", "", 8)
+    for _, r in df_ejercicios.iterrows():
+        pct_ej = (r["Validos"] / r["Total_Intentos"] * 100) if r["Total_Intentos"] > 0 else 0
+        pdf.cell(65, 6, str(r["movimiento"])[:32], border=1)
+        pdf.cell(30, 6, str(r["Total_Intentos"]), border=1, align="C")
+        pdf.cell(30, 6, str(r["Validos"]), border=1, align="C")
+        pdf.cell(30, 6, f"{r['Max_Kg']:.1f} kg", border=1, align="C")
+        pdf.cell(35, 6, f"{pct_ej:.1f}%", border=1, align="C")
         pdf.ln()
 
     out = pdf.output()
@@ -800,7 +950,6 @@ elif menu == "🔍 Detalle Diario":
             )
 
         st.write("---")
-        
         col_h1, col_h2 = st.columns(2)
         with col_h1:
             with st.expander("📋 Duplicar / Copiar esta Sesión a Otro Día"):
@@ -853,6 +1002,41 @@ elif menu == "🔍 Detalle Diario":
                     st.success("¡Ejercicio transferido exitosamente!")
                     st.rerun()
 
+        with st.expander("📥 Importar Excel Directamente a Esta Sesión"):
+            archivo_excel_hist = st.file_uploader("Subir Excel para agregar o reemplazar a esta sesión:", type=["xlsx", "xls"], key="uploader_hist")
+            if archivo_excel_hist is not None:
+                try:
+                    df_imp_hist = procesar_excel_importado(archivo_excel_hist)
+                    st.write("**Previsualización:**")
+                    st.dataframe(df_imp_hist, use_container_width=True)
+                    if st.button("➕ Anexar estos datos a la Sesión Actual"):
+                        conn = get_db_connection()
+                        c = conn.cursor()
+                        pr_arr_g = float(cargar_estado_disco("pr_arr", 70.0))
+                        pr_env_g = float(cargar_estado_disco("pr_env", 90.0))
+                        
+                        for _, r in df_imp_hist.iterrows():
+                            valido = bool(r["Válido (✔)"])
+                            res = "Completado" if valido else "Falla"
+                            tipo_actual = str(r["Tipo"])
+                            pr_base = pr_arr_g if tipo_actual == "Arranque" else pr_env_g
+                            obs = str(r["Observación Técnica"])
+                            c.execute("""
+                                INSERT INTO intentos (fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                fecha_actual_sesion, tipo_actual, float(pr_base), str(r.get("Movimiento", "")),
+                                str(r.get("Serie", "S1")), str(r.get("Rep", "Rep 1")), str(r.get("Movimiento", "")),
+                                float(str(r.get("% 1RM", "70")).replace("%", "") if str(r.get("% 1RM", "70")).replace("%", "").isdigit() else 70.0),
+                                float(r.get("Carga (kg)", 0.0)), res, obs, jornada_actual_sesion
+                            ))
+                        conn.commit()
+                        conn.close()
+                        st.success("¡Datos anexados a la sesión!")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Error al leer Excel: {e}")
+
         with st.expander("📅 Cambiar Fecha de la Sesión Completa"):
             nueva_fecha_glob = st.date_input("Nueva fecha para toda esta sesión:", pd.to_datetime(fecha_actual_sesion).date(), key="n_f_g")
             if st.button("🔄 Aplicar Nueva Fecha"):
@@ -868,10 +1052,48 @@ elif menu == "🔍 Detalle Diario":
                 st.success(f"Sesión transferida al {nueva_fecha_glob}")
                 st.rerun()
 
+        with st.expander("➕ Añadir Ejercicio Retroactivo Manual"):
+            with st.form("form_retroactivo"):
+                col_r1, col_r2, col_r3 = st.columns(3)
+                with col_r1:
+                    r_tipo = st.selectbox("Tipo", ["Arranque", "Envión", "Fuerza"], key="r_t")
+                    r_mov = st.text_input("Movimiento / Ejercicio", placeholder="Ej: Clásico", key="r_m")
+                with col_r2:
+                    r_serie = st.text_input("Serie", value="S1", key="r_s")
+                    r_rep = st.text_input("Repetición", value="Rep 1", key="r_r")
+                with col_r3:
+                    r_peso = st.number_input("Kilos", min_value=0.0, value=70.0, step=0.5, key="r_p")
+                    r_pct = st.number_input("% 1RM", min_value=10, max_value=150, value=80, key="r_pct")
+                
+                col_r4, col_r5 = st.columns([1, 2])
+                with col_r4:
+                    r_valido = st.checkbox("¿Válido?", value=True, key="r_val")
+                with col_r5:
+                    r_obs = st.text_input("Observación Técnica", key="r_obs")
+                
+                if st.form_submit_button("➕ Insertar en esta Sesión"):
+                    if r_mov.strip():
+                        res_retro = "Completado" if r_valido else "Falla"
+                        conn = get_db_connection()
+                        c = conn.cursor()
+                        pr_calc = float(cargar_estado_disco("pr_arr", 70.0)) if r_tipo == "Arranque" else float(cargar_estado_disco("pr_env", 90.0))
+                        c.execute("""
+                            INSERT INTO intentos (fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            fecha_actual_sesion, r_tipo, pr_calc, r_mov.strip(),
+                            r_serie, r_rep, r_mov.strip(), float(r_pct), float(r_peso),
+                            res_retro, r_obs, jornada_actual_sesion
+                        ))
+                        conn.commit()
+                        conn.close()
+                        st.success("¡Ejercicio insertado en la sesión!")
+                        st.rerun()
+                    else:
+                        st.warning("Escribe el nombre del movimiento.")
+
         st.write("---")
         st.subheader("✏️ Editor de Intentos (Modificar o Eliminar Filas)")
-        st.caption("💡 Para eliminar un intento, selecciónalo en la tabla y presiona Supr/Delete; luego pulsa **Guardar Modificaciones**.")
-
         df_sesion["Válido (✔)"] = df_sesion["resultado"] == "Completado"
         columnas_visibles = ["id", "tipo_sesion", "serie", "repeticion", "movimiento", "pct_pr", "peso", "Válido (✔)", "observacion"]
         
@@ -900,7 +1122,6 @@ elif menu == "🔍 Detalle Diario":
             if st.button("💾 Guardar Modificaciones / Eliminar Filas", type="primary"):
                 conn = get_db_connection()
                 c = conn.cursor()
-                
                 ids_anteriores = set(df_sesion["id"].tolist())
                 ids_actuales = set(df_editado["id"].dropna().astype(int).tolist())
                 ids_a_borrar = ids_anteriores - ids_actuales
@@ -948,10 +1169,10 @@ elif menu == "🔍 Detalle Diario":
                 st.rerun()
 
 # -------------------------------------------------------------
-# MÓDULO 4: DASHBOARD SEMESTRAL
+# MÓDULO 4: DASHBOARD SEMESTRAL (GRÁFICAS COMPARATIVAS Y DESCARGA)
 # -------------------------------------------------------------
 elif menu == "📊 Dashboard Semestral":
-    st.title("📈 Progreso Semestral")
+    st.title("📈 Dashboard Semestral y Progresión")
     conn = get_db_connection()
     df_all = pd.read_sql_query("SELECT * FROM intentos", conn)
     conn.close()
@@ -959,9 +1180,51 @@ elif menu == "📊 Dashboard Semestral":
     if df_all.empty:
         st.info("Registra más sesiones para ver las estadísticas acumuladas.")
     else:
-        df_all["fecha"] = pd.to_datetime(df_all["fecha"])
         df_all["is_comp"] = df_all["resultado"] == "Completado"
+        df_all["jornada"] = df_all["jornada"].fillna("Sesión 1")
 
+        # 1. Métricas Globales Acumuladas
+        tot_movs = len(df_all)
+        tot_val = int(df_all["is_comp"].sum())
+        tot_fal = tot_movs - tot_val
+        pct_global = (tot_val / tot_movs * 100) if tot_movs > 0 else 0
+        tonelaje_global = df_all[df_all["is_comp"]]["peso"].sum()
+
+        c_s1, c_s2, c_s3, c_s4 = st.columns(4)
+        c_s1.metric("Efectividad Semestral", f"{pct_global:.1f}%")
+        c_s2.metric("Válidos Acumulados", tot_val)
+        c_s3.metric("Fallas Acumuladas", tot_fal)
+        c_s4.metric("Tonelaje Semestral", f"{tonelaje_global:.1f} kg")
+
+        st.write("---")
+        st.subheader("📥 Exportar Reporte Semestral Completo (1 Clic)")
+        st.caption("Descarga el informe ejecutivo con KPIs acumulados, tabla de progresión diaria y rendimiento por ejercicio.")
+        
+        col_dl_sem1, col_dl_sem2 = st.columns(2)
+        with col_dl_sem1:
+            bytes_sem_excel = generar_semestral_excel(df_all)
+            st.download_button(
+                label="📊 Descargar Dashboard Semestral en Excel (.xlsx)",
+                data=bytes_sem_excel,
+                file_name="Dashboard_Semestral_Halterofilia.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="btn_dl_sem_excel"
+            )
+            
+        with col_dl_sem2:
+            bytes_sem_pdf = generar_semestral_pdf(df_all)
+            st.download_button(
+                label="📑 Descargar Dashboard Semestral en PDF (.pdf)",
+                data=bytes_sem_pdf,
+                file_name="Dashboard_Semestral_Halterofilia.pdf",
+                mime="application/pdf",
+                key="btn_dl_sem_pdf"
+            )
+
+        st.write("---")
+        st.subheader("📈 Gráficas Comparativas")
+
+        # Gráfica 1: Curva de Efectividad Diaria (Arranque vs Envión)
         df_progreso = df_all.groupby(["fecha", "tipo_sesion"]).agg(
             Válidos=("is_comp", "sum"),
             Total=("id", "count")
@@ -974,8 +1237,40 @@ elif menu == "📊 Dashboard Semestral":
             y="% Efectividad",
             color="tipo_sesion",
             markers=True,
-            title="Curva de Efectividad Técnica: Arranque vs Envión",
-            labels={"fecha": "Fecha", "% Efectividad": "% Éxito", "tipo_sesion": "Levantamiento"}
+            title="Evolución Técnica Diaria: Arranque vs Envión (% Éxito)",
+            labels={"fecha": "Fecha", "% Efectividad": "% Efectividad", "tipo_sesion": "Tipo"}
         )
         fig_line.update_yaxes(range=[0, 105])
         st.plotly_chart(fig_line, use_container_width=True)
+
+        # Gráfica 2: Tonelaje Total Acumulado por Día
+        df_tonelaje_dia = df_all[df_all["is_comp"]].groupby("fecha")["peso"].sum().reset_index()
+        fig_bar = px.bar(
+            df_tonelaje_dia,
+            x="fecha",
+            y="peso",
+            title="Tonelaje Total Válido por Día (Kilos Acumulados)",
+            labels={"fecha": "Fecha", "peso": "Kilos Levantados (kg)"},
+            color_discrete_sequence=["#2E7D32"]
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+        st.write("---")
+        st.subheader("📋 Resumen Diario Consolidado")
+        
+        df_resumen_diario_vista = df_all.groupby(["fecha", "jornada"]).agg(
+            Total_Movs=("id", "count"),
+            Validos=("is_comp", "sum"),
+            Tonelaje_Kg=("peso", lambda x: x[df_all.loc[x.index, "is_comp"]].sum())
+        ).reset_index()
+        df_resumen_diario_vista["Fallas"] = df_resumen_diario_vista["Total_Movs"] - df_resumen_diario_vista["Validos"]
+        df_resumen_diario_vista["% Efectividad"] = (df_resumen_diario_vista["Validos"] / df_resumen_diario_vista["Total_Movs"] * 100).round(1).astype(str) + "%"
+        df_resumen_diario_vista["Tonelaje_Kg"] = df_resumen_diario_vista["Tonelaje_Kg"].round(1).astype(str) + " kg"
+
+        st.dataframe(
+            df_resumen_diario_vista.rename(columns={
+                "fecha": "Fecha", "jornada": "Jornada / Turno", "Total_Movs": "Total Movs",
+                "Validos": "Válidos", "Fallas": "Fallas", "% Efectividad": "% Efectividad", "Tonelaje_Kg": "Tonelaje Válido"
+            }),
+            use_container_width=True
+        )
