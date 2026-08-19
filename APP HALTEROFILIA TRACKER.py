@@ -3,6 +3,8 @@ import pandas as pd
 import sqlite3
 import plotly.express as px
 import json
+import base64
+import requests
 from datetime import date
 
 st.set_page_config(
@@ -95,7 +97,51 @@ def cargar_estado_disco(clave, valor_defecto):
     return valor_defecto
 
 # -------------------------------------------------------------
-# CARGAR ESTADOS GUARDADOS EN DISCO
+# MOTOR DE LECTURA DE PIZARRA
+# -------------------------------------------------------------
+def procesar_foto_pizarra(image_file, api_key):
+    image_bytes = image_file.getvalue()
+    b64_image = base64.b64encode(image_bytes).decode("utf-8")
+    mime_type = image_file.type if hasattr(image_file, "type") and image_file.type else "image/jpeg"
+
+    prompt = """
+    Extrae la lista de ejercicios de halterofilia de la imagen.
+    Devuelve ÚNICAMENTE un JSON con esta estructura exacta:
+    [
+      {
+        "Tipo": "Arranque" | "Envión" | "Fuerza",
+        "Complejo / Ejercicios": "nombre del combo (ej: Jalón c/p + Clásico)",
+        "Series": numero_entero,
+        "Reps": numero_entero,
+        "% 1RM": numero_entero
+      }
+    ]
+    """
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": mime_type, "data": b64_image}}
+            ]
+        }]
+    }
+    
+    res = requests.post(url, json=payload, timeout=30)
+    if res.status_code != 200:
+        raise Exception(f"Error de lectura ({res.status_code}). Puedes ingresar los bloques manualmente abajo.")
+    
+    data_raw = res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    if "```json" in data_raw:
+        data_raw = data_raw.split("```json")[1].split("```")[0].strip()
+    elif "```" in data_raw:
+        data_raw = data_raw.split("```")[1].split("```")[0].strip()
+        
+    return json.loads(data_raw)
+
+# -------------------------------------------------------------
+# MEMORIA Y ESTADO
 # -------------------------------------------------------------
 if "lista_bloques" not in st.session_state:
     bloques_defecto = [
@@ -118,7 +164,6 @@ if "menu_nav" not in st.session_state:
 # BARRA LATERAL
 # -------------------------------------------------------------
 st.sidebar.title("🏋️‍♂️ Navegación")
-
 opciones_menu = [
     "⚙️ 1. Esquema y PRs", 
     "🏋️‍♂️ 2. Registro en Vivo", 
@@ -159,7 +204,26 @@ if menu == "⚙️ 1. Esquema y PRs":
         st.session_state["cfg_pr_env"] = pr_env_in
 
     st.divider()
-    st.subheader("➕ Agregar Ejercicio o Bloque")
+    st.subheader("📷 Cargar desde Foto de Pizarra (Opcional)")
+    foto_pizarra = st.file_uploader("Sube una foto de la pizarra", type=["png", "jpg", "jpeg"])
+    
+    # Campo opcional por si tienes clave de API en Secrets o manual
+    api_key_guardada = st.secrets.get("GEMINI_API_KEY", "")
+
+    if foto_pizarra:
+        if st.button("🤖 Leer Foto y Rellenar Esquema"):
+            with st.spinner("Analizando la pizarra..."):
+                try:
+                    bloques_extraidos = procesar_foto_pizarra(foto_pizarra, api_key_guardada)
+                    st.session_state["lista_bloques"] = bloques_extraidos
+                    guardar_estado_disco("lista_bloques", bloques_extraidos)
+                    st.success("¡Pizarra leída con éxito! Revisa y ajusta los bloques abajo.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Aviso: {e}")
+
+    st.divider()
+    st.subheader("➕ Agregar Ejercicio o Bloque Manualmente")
     
     with st.form("form_nuevo_bloque", clear_on_submit=True):
         f_tipo = st.selectbox("Tipo de Movimiento", ["Arranque", "Envión", "Fuerza"])
@@ -184,26 +248,47 @@ if menu == "⚙️ 1. Esquema y PRs":
                     "% 1RM": float(f_pct)
                 })
                 guardar_estado_disco("lista_bloques", st.session_state["lista_bloques"])
-                st.success(f"¡Agregado y guardado: {f_ejercicio} ({f_series}x{f_reps} @ {f_pct}%)!")
+                st.success(f"¡Agregado: {f_ejercicio}!")
                 st.rerun()
             else:
                 st.warning("Escribe el nombre del ejercicio antes de agregar.")
 
     st.divider()
-    st.subheader("📋 Bloques Planificados para Hoy")
+    st.subheader("📋 Bloques Planificados para Hoy (Modificable)")
     
     if len(st.session_state["lista_bloques"]) == 0:
-        st.info("No hay bloques agregados todavía. Usa el formulario de arriba.")
+        st.info("No hay bloques agregados todavía. Sube una foto o agrégalos con el formulario.")
     else:
-        df_mostrar = pd.DataFrame(st.session_state["lista_bloques"])
-        st.dataframe(df_mostrar, use_container_width=True)
+        df_bloques = pd.DataFrame(st.session_state["lista_bloques"])
         
+        # Tabla interactiva para ajustar rápidamente lo que leyó la foto
+        cfg_bloques = {
+            "Tipo": st.column_config.SelectboxColumn("Tipo", options=["Arranque", "Envión", "Fuerza"], required=True),
+            "Complejo / Ejercicios": st.column_config.TextColumn("Complejo / Ejercicios", width="large", required=True),
+            "Series": st.column_config.NumberColumn("Series", min_value=1, max_value=20, default=1),
+            "Reps": st.column_config.NumberColumn("Reps", min_value=1, max_value=20, default=1),
+            "% 1RM": st.column_config.NumberColumn("% 1RM", min_value=10, max_value=150, default=70, format="%d%%")
+        }
+
+        bloques_editados = st.data_editor(
+            df_bloques,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config=cfg_bloques,
+            key="editor_bloques_esquema"
+        )
+        
+        # Auto-guardado de los ajustes hechos en la tabla
+        st.session_state["lista_bloques"] = bloques_editados.to_dict(orient="records")
+        guardar_estado_disco("lista_bloques", st.session_state["lista_bloques"])
+
         col_b1, col_b2 = st.columns(2)
         with col_b1:
             if st.button("🗑️ Borrar Último Bloque"):
-                st.session_state["lista_bloques"].pop()
-                guardar_estado_disco("lista_bloques", st.session_state["lista_bloques"])
-                st.rerun()
+                if st.session_state["lista_bloques"]:
+                    st.session_state["lista_bloques"].pop()
+                    guardar_estado_disco("lista_bloques", st.session_state["lista_bloques"])
+                    st.rerun()
         with col_b2:
             if st.button("🧹 Limpiar Todo el Esquema"):
                 st.session_state["lista_bloques"] = []
@@ -219,11 +304,11 @@ if menu == "⚙️ 1. Esquema y PRs":
             for row in st.session_state["lista_bloques"]:
                 tipo_mov = row["Tipo"]
                 pr_base = pr_arr if tipo_mov == "Arranque" else pr_env
-                complejo_str = row["Complejo / Ejercicios"]
+                complejo_str = str(row["Complejo / Ejercicios"])
                 movimientos = [m.strip() for m in complejo_str.split("+") if m.strip()]
-                series = int(row["Series"])
-                reps = int(row["Reps"])
-                pct = float(row["% 1RM"])
+                series = int(row["Series"]) if pd.notna(row["Series"]) else 1
+                reps = int(row["Reps"]) if pd.notna(row["Reps"]) else 1
+                pct = float(row["% 1RM"]) if pd.notna(row["% 1RM"]) else 70.0
                 peso = round((pr_base * (pct / 100.0)) * 2) / 2
                 
                 for s in range(1, series + 1):
@@ -325,7 +410,6 @@ elif menu == "🔍 Detalle Diario":
         fecha_sel = st.selectbox("Selecciona la fecha a consultar o editar:", fechas)
         df_dia = df_raw[df_raw["fecha"] == fecha_sel].copy()
 
-        # Métricas calculadas
         tot_movs = len(df_dia)
         tot_val = len(df_dia[df_dia["resultado"] == "Completado"])
         tot_fal = len(df_dia[df_dia["resultado"] == "Falla"])
@@ -338,7 +422,7 @@ elif menu == "🔍 Detalle Diario":
 
         st.write("---")
         st.subheader("✏️ Editar Intentos de este Día")
-        st.caption("Puedes modificar los kilos, cambiar si fue válido o escribir notas técnicas directamente en la tabla.")
+        st.caption("Modifica kilos, resultados u observaciones directamente en la tabla.")
 
         df_dia["Válido (✔)"] = df_dia["resultado"] == "Completado"
         columnas_visibles = ["id", "tipo_sesion", "serie", "repeticion", "movimiento", "pct_pr", "peso", "Válido (✔)", "observacion"]
@@ -378,7 +462,7 @@ elif menu == "🔍 Detalle Diario":
                     """, (float(r["peso"]), res, obs, int(r["id"])))
                 conn.commit()
                 conn.close()
-                st.success("✅ ¡Entrenamiento anterior actualizado correctamente!")
+                st.success("✅ ¡Entrenamiento actualizado correctamente!")
                 st.rerun()
 
         with col_btn_del:
