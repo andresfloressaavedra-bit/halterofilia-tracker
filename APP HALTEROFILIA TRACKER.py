@@ -66,7 +66,6 @@ def init_db():
             jornada TEXT DEFAULT 'Sesión 1'
         )
     """)
-    # Migración en caso de que falte la columna jornada
     c.execute("PRAGMA table_info(intentos)")
     cols = [col[1] for col in c.fetchall()]
     if "jornada" not in cols:
@@ -107,7 +106,7 @@ def cargar_estado_disco(clave, valor_defecto):
     return valor_defecto
 
 # -------------------------------------------------------------
-# FUNCIONES DE EXPORTACIÓN (EXCEL Y PDF)
+# FUNCIONES DE EXPORTACIÓN ROBUSTAS (EXCEL Y PDF)
 # -------------------------------------------------------------
 def generar_excel(df, titulo_hoja="Entrenamiento"):
     output = io.BytesIO()
@@ -120,7 +119,6 @@ def generar_pdf(df, titulo="Reporte de Entrenamiento", subtitulo=""):
     pdf.set_auto_page_break(auto=True, margin=12)
     pdf.add_page()
     
-    # Encabezado
     pdf.set_font("Helvetica", "B", 16)
     pdf.cell(0, 8, titulo, ln=True, align="C")
     if subtitulo:
@@ -128,7 +126,6 @@ def generar_pdf(df, titulo="Reporte de Entrenamiento", subtitulo=""):
         pdf.cell(0, 6, subtitulo, ln=True, align="C")
     pdf.ln(4)
     
-    # Tabla
     pdf.set_font("Helvetica", "B", 8)
     columnas = ["Tipo", "Serie", "Rep", "Movimiento", "Kg", "%", "Estado", "Observación"]
     anchos = [20, 14, 14, 45, 14, 14, 20, 48]
@@ -138,27 +135,32 @@ def generar_pdf(df, titulo="Reporte de Entrenamiento", subtitulo=""):
     pdf.ln()
     
     pdf.set_font("Helvetica", "", 8)
-    for _, fila in df.iterrows():
-        tipo = str(fila.get("Tipo", fila.get("tipo_sesion", "")))[:10]
-        serie = str(fila.get("Serie", fila.get("serie", "")))[:6]
-        rep = str(fila.get("Rep", fila.get("repeticion", "")))[:6]
-        mov = str(fila.get("Movimiento", fila.get("movimiento", "")))[:24]
-        kg = str(fila.get("Carga (kg)", fila.get("peso", "")))[:6]
-        pct = str(fila.get("% 1RM", fila.get("pct_pr", "")))[:6]
-        res = "Válido" if str(fila.get("Válido (✔)", fila.get("resultado", ""))) in ["True", "Completado"] else "Falla"
-        obs = str(fila.get("Observación Técnica", fila.get("observacion", "")))[:26]
+    if isinstance(df, pd.DataFrame) and not df.empty:
+        for _, fila in df.iterrows():
+            tipo = str(fila.get("Tipo", fila.get("tipo_sesion", "")))[:10]
+            serie = str(fila.get("Serie", fila.get("serie", "")))[:6]
+            rep = str(fila.get("Rep", fila.get("repeticion", "")))[:6]
+            mov = str(fila.get("Movimiento", fila.get("movimiento", "")))[:24]
+            kg = str(fila.get("Carga (kg)", fila.get("peso", "")))[:6]
+            pct = str(fila.get("% 1RM", fila.get("pct_pr", "")))[:6]
+            res = "Válido" if str(fila.get("Válido (✔)", fila.get("resultado", ""))) in ["True", "Completado"] else "Falla"
+            obs = str(fila.get("Observación Técnica", fila.get("observacion", "")))[:26]
 
-        pdf.cell(anchos[0], 6, tipo, border=1, align="C")
-        pdf.cell(anchos[1], 6, serie, border=1, align="C")
-        pdf.cell(anchos[2], 6, rep, border=1, align="C")
-        pdf.cell(anchos[3], 6, mov, border=1)
-        pdf.cell(anchos[4], 6, kg, border=1, align="C")
-        pdf.cell(anchos[5], 6, pct, border=1, align="C")
-        pdf.cell(anchos[6], 6, res, border=1, align="C")
-        pdf.cell(anchos[7], 6, obs, border=1)
-        pdf.ln()
+            pdf.cell(anchos[0], 6, tipo, border=1, align="C")
+            pdf.cell(anchos[1], 6, serie, border=1, align="C")
+            pdf.cell(anchos[2], 6, rep, border=1, align="C")
+            pdf.cell(anchos[3], 6, mov, border=1)
+            pdf.cell(anchos[4], 6, kg, border=1, align="C")
+            pdf.cell(anchos[5], 6, pct, border=1, align="C")
+            pdf.cell(anchos[6], 6, res, border=1, align="C")
+            pdf.cell(anchos[7], 6, obs, border=1)
+            pdf.ln()
 
-    return pdf.output()
+    # Conversión explícita a bytes para Streamlit
+    out = pdf.output()
+    if isinstance(out, str):
+        return out.encode("latin1")
+    return bytes(out)
 
 # -------------------------------------------------------------
 # MEMORIA Y ESTADOS DE SESIÓN
@@ -333,29 +335,67 @@ if menu == "⚙️ 1. Esquema y PRs":
             st.rerun()
 
 # -------------------------------------------------------------
-# MÓDULO 2: REGISTRO EN VIVO Y DESCARGA
+# MÓDULO 2: REGISTRO EN VIVO CON ADICIÓN EN CALIENTE
 # -------------------------------------------------------------
 elif menu == "🏋️‍♂️ 2. Registro en Vivo":
     st.title("🏋️‍♂️ Registro de Levantamientos en Vivo")
     
+    with st.expander("➕ ¿Añadieron más ejercicios a la clase? Agrégalos aquí"):
+        c_ex1, c_ex2, c_ex3 = st.columns([1.5, 1, 1])
+        with c_ex1:
+            ex_tipo = st.selectbox("Tipo de Ejercicio Extra", ["Arranque", "Envión", "Fuerza"], key="ex_tipo_k")
+            ex_nombre = st.text_input("Nombre del Ejercicio Extra", placeholder="Ej: Sentadilla Trasera", key="ex_nombre_k")
+        with c_ex2:
+            ex_series = st.number_input("Series Extra", min_value=1, max_value=10, value=1, step=1, key="ex_s_k")
+            ex_reps = st.number_input("Reps Extra", min_value=1, max_value=10, value=1, step=1, key="ex_r_k")
+        with c_ex3:
+            ex_peso = st.number_input("Peso (kg)", min_value=0.0, max_value=300.0, value=60.0, step=1.0, key="ex_p_k")
+            ex_pct = st.number_input("% 1RM (opcional)", min_value=0, max_value=150, value=75, step=5, key="ex_pct_k")
+
+        if st.button("➕ Insertar a la Matriz Actual", type="secondary"):
+            if ex_nombre.strip():
+                movimientos_extra = [m.strip() for m in ex_nombre.split("+") if m.strip()]
+                nuevas_filas = []
+                for s in range(1, int(ex_series) + 1):
+                    for r in range(1, int(ex_reps) + 1):
+                        for mov in movimientos_extra:
+                            nuevas_filas.append({
+                                "Tipo": ex_tipo,
+                                "Bloque": ex_nombre.strip(),
+                                "Serie": f"S{s}",
+                                "Rep": f"Rep {r}",
+                                "Movimiento": mov,
+                                "Carga (kg)": float(ex_peso),
+                                "% 1RM": f"{int(ex_pct)}%",
+                                "Válido (✔)": True,
+                                "Observación Técnica": ""
+                            })
+                df_nuevas = pd.DataFrame(nuevas_filas)
+                st.session_state["matriz_activa"] = pd.concat([st.session_state["matriz_activa"], df_nuevas], ignore_index=True)
+                guardar_estado_disco("matriz_activa", st.session_state["matriz_activa"].to_dict(orient="records"))
+                st.success(f"¡Se agregaron {len(nuevas_filas)} intentos extra al final de tu tabla!")
+                st.rerun()
+            else:
+                st.warning("Escribe el nombre del ejercicio extra.")
+
     if st.session_state["matriz_activa"].empty:
-        st.info("👈 Primero ve a **'1. Esquema y PRs'** en la barra lateral y presiona **'Generar Matriz'**.")
+        st.info("👈 Primero ve a **'1. Esquema y PRs'** en la barra lateral y presiona **'Generar Matriz'**, o añade ejercicios arriba.")
     else:
         cfg_matriz = {
-            "Tipo": st.column_config.TextColumn("Tipo", disabled=True),
-            "Bloque": st.column_config.TextColumn("Bloque", disabled=True),
-            "Serie": st.column_config.TextColumn("Serie", disabled=True),
-            "Rep": st.column_config.TextColumn("Rep", disabled=True),
-            "Movimiento": st.column_config.TextColumn("Movimiento", disabled=True),
+            "Tipo": st.column_config.SelectboxColumn("Tipo", options=["Arranque", "Envión", "Fuerza"], required=True),
+            "Bloque": st.column_config.TextColumn("Bloque", width="medium"),
+            "Serie": st.column_config.TextColumn("Serie", width="small"),
+            "Rep": st.column_config.TextColumn("Rep", width="small"),
+            "Movimiento": st.column_config.TextColumn("Movimiento", width="medium"),
             "Válido (✔)": st.column_config.CheckboxColumn("¿Válido?", default=True),
             "Carga (kg)": st.column_config.NumberColumn("Peso (kg)", min_value=0.0, step=0.5),
-            "% 1RM": st.column_config.TextColumn("% 1RM", disabled=True),
-            "Observación Técnica": st.column_config.TextColumn("Observación", width="medium")
+            "% 1RM": st.column_config.TextColumn("% 1RM", width="small"),
+            "Observación Técnica": st.column_config.TextColumn("Observación Técnica", width="large")
         }
 
         matriz_final = st.data_editor(
             st.session_state["matriz_activa"],
-            num_rows="fixed",
+            num_rows="dynamic",
             use_container_width=True,
             column_config=cfg_matriz,
             key="editor_matriz_final"
@@ -377,7 +417,8 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
                 label="📥 Descargar Planilla Excel (.xlsx)",
                 data=excel_bytes,
                 file_name=f"Entrenamiento_{fecha_act}_{jornada_act}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="btn_dl_excel_vivo"
             )
 
         with col_exp2:
@@ -386,7 +427,8 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
                 label="📄 Descargar Planilla PDF (.pdf)",
                 data=pdf_bytes,
                 file_name=f"Entrenamiento_{fecha_act}_{jornada_act}.pdf",
-                mime="application/pdf"
+                mime="application/pdf",
+                key="btn_dl_pdf_vivo"
             )
 
         st.write("")
@@ -399,17 +441,18 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
             for _, r in matriz_final.iterrows():
                 valido = bool(r["Válido (✔)"]) if pd.notna(r["Válido (✔)"]) else False
                 res = "Completado" if valido else "Falla"
-                pr_base = pr_arr_g if r["Tipo"] == "Arranque" else pr_env_g
+                tipo_actual = str(r["Tipo"]) if pd.notna(r["Tipo"]) else "Arranque"
+                pr_base = pr_arr_g if tipo_actual == "Arranque" else pr_env_g
                 obs = str(r["Observación Técnica"]) if pd.notna(r["Observación Técnica"]) else ""
                 
                 c.execute("""
                     INSERT INTO intentos (fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    fecha_act, str(r["Tipo"]), float(pr_base), str(r["Bloque"]),
-                    str(r["Serie"]), str(r["Rep"]), str(r["Movimiento"]),
-                    float(str(r["% 1RM"]).replace("%", "")),
-                    float(r["Carga (kg)"]), res, obs, jornada_act
+                    fecha_act, tipo_actual, float(pr_base), str(r.get("Bloque", "")),
+                    str(r.get("Serie", "S1")), str(r.get("Rep", "Rep 1")), str(r.get("Movimiento", "")),
+                    float(str(r.get("% 1RM", "70")).replace("%", "") if str(r.get("% 1RM", "70")).replace("%", "").isdigit() else 70.0),
+                    float(r.get("Carga (kg)", 0.0)), res, obs, jornada_act
                 ))
             conn.commit()
             conn.close()
@@ -432,7 +475,6 @@ elif menu == "🔍 Detalle Diario":
     if df_raw.empty:
         st.info("Aún no tienes entrenamientos registrados.")
     else:
-        # Manejo de múltiples entrenamientos por fecha mediante (Fecha + Jornada)
         df_raw["jornada"] = df_raw["jornada"].fillna("Sesión 1")
         df_raw["sesion_id"] = df_raw["fecha"] + " | " + df_raw["jornada"]
         
@@ -443,7 +485,6 @@ elif menu == "🔍 Detalle Diario":
         fecha_actual_sesion = df_sesion["fecha"].iloc[0]
         jornada_actual_sesion = df_sesion["jornada"].iloc[0]
 
-        # Métricas
         tot_movs = len(df_sesion)
         tot_val = len(df_sesion[df_sesion["resultado"] == "Completado"])
         tot_fal = len(df_sesion[df_sesion["resultado"] == "Falla"])
@@ -454,7 +495,6 @@ elif menu == "🔍 Detalle Diario":
         c2.metric("Válidos", tot_val)
         c3.metric("Fallas", tot_fal)
 
-        # Modificación de Fecha Histórica
         st.write("---")
         with st.expander("📅 Modificar la Fecha de este Entrenamiento"):
             c_f1, c_f2 = st.columns([2, 1])
@@ -493,7 +533,7 @@ elif menu == "🔍 Detalle Diario":
 
         df_editado = st.data_editor(
             df_sesion[columnas_visibles],
-            num_rows="fixed",
+            num_rows="dynamic",
             use_container_width=True,
             column_config=cfg_edicion,
             key=f"editor_historial_{sesion_sel}"
@@ -535,7 +575,8 @@ elif menu == "🔍 Detalle Diario":
                 label="📥 Descargar Sesión en Excel (.xlsx)",
                 data=excel_hist,
                 file_name=f"Historial_{fecha_actual_sesion}_{jornada_actual_sesion}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="btn_dl_excel_hist"
             )
         with col_d2:
             pdf_hist = generar_pdf(df_sesion[columnas_visibles], f"Historial: {fecha_actual_sesion}", f"Jornada: {jornada_actual_sesion}")
@@ -543,7 +584,8 @@ elif menu == "🔍 Detalle Diario":
                 label="📄 Descargar Sesión en PDF (.pdf)",
                 data=pdf_hist,
                 file_name=f"Historial_{fecha_actual_sesion}_{jornada_actual_sesion}.pdf",
-                mime="application/pdf"
+                mime="application/pdf",
+                key="btn_dl_pdf_hist"
             )
 
 # -------------------------------------------------------------
