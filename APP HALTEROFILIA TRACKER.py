@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import plotly.express as px
+import json
 from datetime import date
 
 st.set_page_config(
@@ -11,7 +12,7 @@ st.set_page_config(
 )
 
 # -------------------------------------------------------------
-# ESTILOS PARA EVITAR SALTOS DE PANTALLA EN MÓVIL
+# ESTILOS PARA EVITAR SALTOS DE PANTALLA
 # -------------------------------------------------------------
 st.markdown("""
     <style>
@@ -34,7 +35,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------
-# BASE DE DATOS
+# BASE DE DATOS Y TABLAS DE PERSISTENCIA
 # -------------------------------------------------------------
 def get_db_connection():
     conn = sqlite3.connect("halterofilia.db", timeout=10)
@@ -44,6 +45,7 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
+    # Tabla de entrenamientos guardados finales
     c.execute("""
         CREATE TABLE IF NOT EXISTS intentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,25 +64,54 @@ def init_db():
             pct_pr REAL
         )
     """)
+    # Tabla de borrador persistente (para no perder datos si sales de la app)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS estado_borrador (
+            clave TEXT PRIMARY KEY,
+            valor TEXT
+        )
+    """)
     conn.commit()
     conn.close()
 
 init_db()
 
+def guardar_estado_disco(clave, valor_obj):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO estado_borrador (clave, valor) VALUES (?, ?)", (clave, json.dumps(valor_obj)))
+    conn.commit()
+    conn.close()
+
+def cargar_estado_disco(clave, valor_defecto):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT valor FROM estado_borrador WHERE clave = ?", (clave,))
+    fila = c.fetchone()
+    conn.close()
+    if fila and fila["valor"]:
+        try:
+            return json.loads(fila["valor"])
+        except Exception:
+            return valor_defecto
+    return valor_defecto
+
 # -------------------------------------------------------------
-# MEMORIA DE SESIÓN (PERSISTENCIA INMUNIZADA A RECARGAS)
+# CARGAR ESTADOS GUARDADOS EN DISCO
 # -------------------------------------------------------------
 if "lista_bloques" not in st.session_state:
-    st.session_state["lista_bloques"] = [
+    bloques_defecto = [
         {"Tipo": "Arranque", "Complejo / Ejercicios": "Jalón Arranque c/p rodilla + Arranque c/p rodilla + Clásico", "Series": 1, "Reps": 2, "% 1RM": 50},
         {"Tipo": "Arranque", "Complejo / Ejercicios": "Jalón Arranque c/p rodilla + Arranque c/p rodilla + Clásico", "Series": 1, "Reps": 2, "% 1RM": 60},
         {"Tipo": "Arranque", "Complejo / Ejercicios": "Jalón Arranque c/p rodilla + Arranque c/p rodilla + Clásico", "Series": 2, "Reps": 2, "% 1RM": 70},
         {"Tipo": "Arranque", "Complejo / Ejercicios": "Jalón Arranque c/p rodilla + Arranque c/p rodilla + Clásico", "Series": 4, "Reps": 1, "% 1RM": 80},
         {"Tipo": "Arranque", "Complejo / Ejercicios": "Jalón c/p + Clásico", "Series": 2, "Reps": 1, "% 1RM": 85},
     ]
+    st.session_state["lista_bloques"] = cargar_estado_disco("lista_bloques", bloques_defecto)
 
 if "matriz_activa" not in st.session_state:
-    st.session_state["matriz_activa"] = pd.DataFrame()
+    matriz_guardada = cargar_estado_disco("matriz_activa", [])
+    st.session_state["matriz_activa"] = pd.DataFrame(matriz_guardada)
 
 if "menu_nav" not in st.session_state:
     st.session_state["menu_nav"] = "⚙️ 1. Esquema y PRs"
@@ -111,13 +142,23 @@ st.session_state["menu_nav"] = menu
 if menu == "⚙️ 1. Esquema y PRs":
     st.title("⚙️ Configuración del Entrenamiento")
     
+    val_pr_arr = float(cargar_estado_disco("pr_arr", 70.0))
+    val_pr_env = float(cargar_estado_disco("pr_env", 90.0))
+    
     col_a, col_b = st.columns(2)
     with col_a:
-        st.session_state["cfg_fecha"] = st.date_input("Fecha", st.session_state.get("cfg_fecha", date.today()))
-        st.session_state["cfg_pr_arr"] = st.number_input("PR Arranque (kg)", min_value=1.0, value=float(st.session_state.get("cfg_pr_arr", 70.0)), step=1.0)
+        st.session_state["cfg_fecha"] = st.date_input("Fecha", date.today())
+        pr_arr_in = st.number_input("PR Arranque (kg)", min_value=1.0, value=val_pr_arr, step=1.0)
+        if pr_arr_in != val_pr_arr:
+            guardar_estado_disco("pr_arr", pr_arr_in)
+        st.session_state["cfg_pr_arr"] = pr_arr_in
+
     with col_b:
         st.session_state["cfg_enfoque"] = st.selectbox("Enfoque General", ["Arranque + Envión", "Arranque", "Envión", "Fuerza"], index=0)
-        st.session_state["cfg_pr_env"] = st.number_input("PR Envión (kg)", min_value=1.0, value=float(st.session_state.get("cfg_pr_env", 90.0)), step=1.0)
+        pr_env_in = st.number_input("PR Envión (kg)", min_value=1.0, value=val_pr_env, step=1.0)
+        if pr_env_in != val_pr_env:
+            guardar_estado_disco("pr_env", pr_env_in)
+        st.session_state["cfg_pr_env"] = pr_env_in
 
     st.divider()
     st.subheader("➕ Agregar Ejercicio o Bloque")
@@ -144,7 +185,9 @@ if menu == "⚙️ 1. Esquema y PRs":
                     "Reps": int(f_reps),
                     "% 1RM": float(f_pct)
                 })
-                st.success(f"¡Agregado: {f_ejercicio} ({f_series}x{f_reps} @ {f_pct}%)!")
+                guardar_estado_disco("lista_bloques", st.session_state["lista_bloques"])
+                st.success(f"¡Agregado y guardado: {f_ejercicio} ({f_series}x{f_reps} @ {f_pct}%)!")
+                st.rerun()
             else:
                 st.warning("Escribe el nombre del ejercicio antes de agregar.")
 
@@ -161,10 +204,12 @@ if menu == "⚙️ 1. Esquema y PRs":
         with col_b1:
             if st.button("🗑️ Borrar Último Bloque"):
                 st.session_state["lista_bloques"].pop()
+                guardar_estado_disco("lista_bloques", st.session_state["lista_bloques"])
                 st.rerun()
         with col_b2:
             if st.button("🧹 Limpiar Todo el Esquema"):
                 st.session_state["lista_bloques"] = []
+                guardar_estado_disco("lista_bloques", [])
                 st.rerun()
 
         st.write("")
@@ -198,6 +243,7 @@ if menu == "⚙️ 1. Esquema y PRs":
                                 "Observación Técnica": ""
                             })
             st.session_state["matriz_activa"] = pd.DataFrame(filas)
+            guardar_estado_disco("matriz_activa", filas)
             st.session_state["menu_nav"] = "🏋️‍♂️ 2. Registro en Vivo"
             st.rerun()
 
@@ -229,15 +275,18 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
             column_config=cfg_matriz,
             key="editor_matriz_final"
         )
+        
+        # Auto-guardado en SQLite cada vez que cambias un dato en vivo
         st.session_state["matriz_activa"] = matriz_final
+        guardar_estado_disco("matriz_activa", matriz_final.to_dict(orient="records"))
 
         st.write("")
         if st.button("💾 Guardar Entrenamiento Completo", type="primary"):
             conn = get_db_connection()
             c = conn.cursor()
             fecha_guardar = str(st.session_state.get("cfg_fecha", date.today()))
-            pr_arr_g = float(st.session_state.get("cfg_pr_arr", 70.0))
-            pr_env_g = float(st.session_state.get("cfg_pr_env", 90.0))
+            pr_arr_g = float(cargar_estado_disco("pr_arr", 70.0))
+            pr_env_g = float(cargar_estado_disco("pr_env", 90.0))
 
             for _, r in matriz_final.iterrows():
                 valido = bool(r["Válido (✔)"]) if pd.notna(r["Válido (✔)"]) else False
@@ -256,8 +305,11 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
                 ))
             conn.commit()
             conn.close()
-            st.success("✅ ¡Entrenamiento guardado con éxito!")
+            
+            # Limpieza del borrador una vez guardado definitivamente
             st.session_state["matriz_activa"] = pd.DataFrame()
+            guardar_estado_disco("matriz_activa", [])
+            st.success("✅ ¡Entrenamiento guardado con éxito en el historial permanente!")
             st.session_state["menu_nav"] = "🔍 Detalle Diario"
             st.rerun()
 
