@@ -106,15 +106,163 @@ def cargar_estado_disco(clave, valor_defecto):
     return valor_defecto
 
 # -------------------------------------------------------------
-# FUNCIONES DE EXPORTACIÓN (EXCEL Y PDF)
+# FUNCIONES DE DASHBOARD DIARIO (EXCEL Y PDF MULTI-SECCIÓN)
 # -------------------------------------------------------------
-def generar_excel(df, titulo_hoja="Entrenamiento"):
+def generar_dashboard_excel(df, fecha_str, jornada_str):
+    output = io.BytesIO()
+    
+    # 1. Métricas Globales
+    tot_movs = len(df)
+    tot_val = len(df[df["resultado"] == "Completado"])
+    tot_fal = len(df[df["resultado"] == "Falla"])
+    pct_efectividad = (tot_val / tot_movs * 100) if tot_movs > 0 else 0
+    tonelaje = df[df["resultado"] == "Completado"]["peso"].sum() if "peso" in df.columns else 0.0
+
+    df_kpis = pd.DataFrame([
+        {"Métrica": "Fecha", "Valor": fecha_str},
+        {"Métrica": "Jornada", "Valor": jornada_str},
+        {"Métrica": "Efectividad Técnica (%)", "Valor": f"{pct_efectividad:.1f}%"},
+        {"Métrica": "Levantamientos Válidos", "Valor": tot_val},
+        {"Métrica": "Fallas Técnicas", "Valor": tot_fal},
+        {"Métrica": "Total Movimientos", "Valor": tot_movs},
+        {"Métrica": "Tonelaje Total Válido (kg)", "Valor": f"{tonelaje:.1f} kg"}
+    ])
+
+    # 2. Desglose por Ejercicio
+    df_temp = df.copy()
+    df_temp["es_valido"] = df_temp["resultado"] == "Completado"
+    df_resumen_ej = df_temp.groupby("movimiento").agg(
+        Total_Intentos=("id", "count"),
+        Validos=("es_valido", "sum"),
+        Max_Kg=("peso", "max"),
+        Prom_Kg=("peso", "mean")
+    ).reset_index()
+    df_resumen_ej["% Exito"] = (df_resumen_ej["Validos"] / df_resumen_ej["Total_Intentos"] * 100).round(1).astype(str) + "%"
+    df_resumen_ej["Prom_Kg"] = df_resumen_ej["Prom_Kg"].round(1)
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_kpis.to_excel(writer, sheet_name="Resumen KPIs", index=False)
+        df_resumen_ej.to_excel(writer, sheet_name="Por Ejercicio", index=False)
+        df.to_excel(writer, sheet_name="Detalle Completo", index=False)
+        
+    return output.getvalue()
+
+def generar_dashboard_pdf(df, fecha_str, jornada_str):
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=12)
+    pdf.add_page()
+    
+    # Encabezado Principal
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 8, "DASHBOARD DIARIO DE ENTRENAMIENTO", ln=True, align="C")
+    pdf.set_font("Helvetica", "I", 10)
+    pdf.cell(0, 5, f"Fecha: {fecha_str} | Turno: {jornada_str}", ln=True, align="C")
+    pdf.ln(4)
+
+    # Cálculos
+    tot_movs = len(df)
+    tot_val = len(df[df["resultado"] == "Completado"])
+    tot_fal = len(df[df["resultado"] == "Falla"])
+    pct_efectividad = (tot_val / tot_movs * 100) if tot_movs > 0 else 0
+    tonelaje = df[df["resultado"] == "Completado"]["peso"].sum() if "peso" in df.columns else 0.0
+
+    # Tarjetas de Métricas (Tabla KPIs)
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 6, "1. RESUMEN Y TONELAJE DE SESIÓN", ln=True)
+    pdf.set_font("Helvetica", "", 9)
+    
+    ancho_kpi = 47.5
+    pdf.set_fill_color(240, 240, 240)
+    pdf.cell(ancho_kpi, 6, "Efectividad", border=1, align="C", fill=True)
+    pdf.cell(ancho_kpi, 6, "Válidos / Fallas", border=1, align="C", fill=True)
+    pdf.cell(ancho_kpi, 6, "Total Movs", border=1, align="C", fill=True)
+    pdf.cell(ancho_kpi, 6, "Tonelaje Válido", border=1, align="C", fill=True)
+    pdf.ln()
+
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(ancho_kpi, 8, f"{pct_efectividad:.1f}%", border=1, align="C")
+    pdf.cell(ancho_kpi, 8, f"{tot_val} / {tot_fal}", border=1, align="C")
+    pdf.cell(ancho_kpi, 8, f"{tot_movs}", border=1, align="C")
+    pdf.cell(ancho_kpi, 8, f"{tonelaje:.1f} kg", border=1, align="C")
+    pdf.ln(10)
+
+    # 2. Desglose por Ejercicio
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 6, "2. RENDIMIENTO POR EJERCICIO", ln=True)
+    
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.cell(65, 6, "Ejercicio", border=1, align="C", fill=True)
+    pdf.cell(30, 6, "Intentos", border=1, align="C", fill=True)
+    pdf.cell(30, 6, "Válidos", border=1, align="C", fill=True)
+    pdf.cell(30, 6, "Carga Máx (kg)", border=1, align="C", fill=True)
+    pdf.cell(35, 6, "% Éxito", border=1, align="C", fill=True)
+    pdf.ln()
+
+    df_temp = df.copy()
+    df_temp["es_valido"] = df_temp["resultado"] == "Completado"
+    df_resumen_ej = df_temp.groupby("movimiento").agg(
+        Total_Intentos=("id", "count"),
+        Validos=("es_valido", "sum"),
+        Max_Kg=("peso", "max")
+    ).reset_index()
+
+    pdf.set_font("Helvetica", "", 8)
+    for _, r in df_resumen_ej.iterrows():
+        pct_ej = (r["Validos"] / r["Total_Intentos"] * 100) if r["Total_Intentos"] > 0 else 0
+        pdf.cell(65, 6, str(r["movimiento"])[:32], border=1)
+        pdf.cell(30, 6, str(r["Total_Intentos"]), border=1, align="C")
+        pdf.cell(30, 6, str(r["Validos"]), border=1, align="C")
+        pdf.cell(30, 6, f"{r['Max_Kg']:.1f} kg", border=1, align="C")
+        pdf.cell(35, 6, f"{pct_ej:.1f}%", border=1, align="C")
+        pdf.ln()
+
+    pdf.ln(6)
+
+    # 3. Planilla Detallada
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 6, "3. REGISTRO DETALLADO INTENTO POR INTENTO", ln=True)
+    
+    pdf.set_font("Helvetica", "B", 8)
+    columnas = ["Tipo", "Serie", "Rep", "Movimiento", "Kg", "%", "Estado", "Observación"]
+    anchos = [18, 12, 12, 45, 14, 14, 18, 57]
+    
+    for col, ancho in zip(columnas, anchos):
+        pdf.cell(ancho, 6, col, border=1, align="C", fill=True)
+    pdf.ln()
+    
+    pdf.set_font("Helvetica", "", 8)
+    for _, fila in df.iterrows():
+        tipo = str(fila.get("tipo_sesion", ""))[:10]
+        serie = str(fila.get("serie", ""))[:6]
+        rep = str(fila.get("repeticion", ""))[:6]
+        mov = str(fila.get("movimiento", ""))[:24]
+        kg = str(fila.get("peso", ""))[:6]
+        pct = str(fila.get("pct_pr", ""))[:6]
+        res = "Válido" if str(fila.get("resultado", "")) == "Completado" else "Falla"
+        obs = str(fila.get("observacion", ""))[:32]
+
+        pdf.cell(anchos[0], 5.5, tipo, border=1, align="C")
+        pdf.cell(anchos[1], 5.5, serie, border=1, align="C")
+        pdf.cell(anchos[2], 5.5, rep, border=1, align="C")
+        pdf.cell(anchos[3], 5.5, mov, border=1)
+        pdf.cell(anchos[4], 5.5, kg, border=1, align="C")
+        pdf.cell(anchos[5], 5.5, pct, border=1, align="C")
+        pdf.cell(anchos[6], 5.5, res, border=1, align="C")
+        pdf.cell(anchos[7], 5.5, obs, border=1)
+        pdf.ln()
+
+    out = pdf.output()
+    if isinstance(out, str):
+        return out.encode("latin1")
+    return bytes(out)
+
+def generar_excel_simple(df, titulo_hoja="Entrenamiento"):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name=titulo_hoja[:30], index=False)
     return output.getvalue()
 
-def generar_pdf(df, titulo="Reporte de Entrenamiento", subtitulo=""):
+def generar_pdf_simple(df, titulo="Reporte de Entrenamiento", subtitulo=""):
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=12)
     pdf.add_page()
@@ -411,7 +559,7 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
         jornada_act = str(st.session_state.get("cfg_jornada", "Sesión 1"))
 
         with col_exp1:
-            excel_bytes = generar_excel(matriz_final, f"Entrenamiento_{fecha_act}")
+            excel_bytes = generar_excel_simple(matriz_final, f"Entrenamiento_{fecha_act}")
             st.download_button(
                 label="📥 Descargar Planilla Excel (.xlsx)",
                 data=excel_bytes,
@@ -421,7 +569,7 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
             )
 
         with col_exp2:
-            pdf_bytes = generar_pdf(matriz_final, f"Planilla: {fecha_act}", f"Jornada: {jornada_act}")
+            pdf_bytes = generar_pdf_simple(matriz_final, f"Planilla: {fecha_act}", f"Jornada: {jornada_act}")
             st.download_button(
                 label="📄 Descargar Planilla PDF (.pdf)",
                 data=pdf_bytes,
@@ -463,7 +611,7 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
             st.rerun()
 
 # -------------------------------------------------------------
-# MÓDULO 3: DETALLE, EDICIÓN PROFUNDA, COPIAR Y REASIGNAR
+# MÓDULO 3: DETALLE, EDICIÓN PROFUNDA Y DASHBOARD DIARIO EN 1 CLIC
 # -------------------------------------------------------------
 elif menu == "🔍 Detalle Diario":
     st.title("📋 Gestión y Edición de Entrenamientos")
@@ -484,20 +632,50 @@ elif menu == "🔍 Detalle Diario":
         fecha_actual_sesion = df_sesion["fecha"].iloc[0]
         jornada_actual_sesion = df_sesion["jornada"].iloc[0]
 
-        # Métricas
+        # Métricas principales
         tot_movs = len(df_sesion)
         tot_val = len(df_sesion[df_sesion["resultado"] == "Completado"])
         tot_fal = len(df_sesion[df_sesion["resultado"] == "Falla"])
         pct_efectividad = (tot_val / tot_movs * 100) if tot_movs > 0 else 0
+        tonelaje_tot = df_sesion[df_sesion["resultado"] == "Completado"]["peso"].sum()
 
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("Efectividad", f"{pct_efectividad:.1f}%")
         c2.metric("Válidos", tot_val)
         c3.metric("Fallas", tot_fal)
+        c4.metric("Tonelaje Válido", f"{tonelaje_tot:.1f} kg")
+
+        # ---------------------------------------------------------
+        # BOTONES DASHBOARD DIARIO EN 1 CLIC
+        # ---------------------------------------------------------
+        st.write("---")
+        st.subheader("📊 Generar Dashboard Diario Completo (1 Clic)")
+        st.caption("Exporta un informe ejecutivo con KPIs, análisis por ejercicio, tonelaje y detalle técnico completo.")
+        
+        col_dash1, col_dash2 = st.columns(2)
+        with col_dash1:
+            bytes_dash_excel = generar_dashboard_excel(df_sesion, fecha_actual_sesion, jornada_actual_sesion)
+            st.download_button(
+                label="📊 Descargar Dashboard en Excel (.xlsx)",
+                data=bytes_dash_excel,
+                file_name=f"Dashboard_Diario_{fecha_actual_sesion}_{jornada_actual_sesion}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="btn_dl_dash_excel"
+            )
+            
+        with col_dash2:
+            bytes_dash_pdf = generar_dashboard_pdf(df_sesion, fecha_actual_sesion, jornada_actual_sesion)
+            st.download_button(
+                label="📑 Descargar Dashboard en PDF (.pdf)",
+                data=bytes_dash_pdf,
+                file_name=f"Dashboard_Diario_{fecha_actual_sesion}_{jornada_actual_sesion}.pdf",
+                mime="application/pdf",
+                key="btn_dl_dash_pdf"
+            )
 
         st.write("---")
         
-        # 1. Herramientas: Copiar Sesión, Mover Ejercicio y Cambiar Fecha
+        # Herramientas avanzadas (Copiar Sesión, Mover Ejercicio y Cambiar Fecha)
         col_h1, col_h2 = st.columns(2)
         
         with col_h1:
@@ -684,27 +862,6 @@ elif menu == "🔍 Detalle Diario":
                 conn.close()
                 st.warning(f"Sesión {fecha_actual_sesion} ({jornada_actual_sesion}) eliminada.")
                 st.rerun()
-
-        st.write("---")
-        col_d1, col_d2 = st.columns(2)
-        with col_d1:
-            excel_hist = generar_excel(df_sesion[columnas_visibles], f"{fecha_actual_sesion}")
-            st.download_button(
-                label="📥 Descargar Sesión en Excel (.xlsx)",
-                data=excel_hist,
-                file_name=f"Historial_{fecha_actual_sesion}_{jornada_actual_sesion}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="btn_dl_excel_hist"
-            )
-        with col_d2:
-            pdf_hist = generar_pdf(df_sesion[columnas_visibles], f"Historial: {fecha_actual_sesion}", f"Jornada: {jornada_actual_sesion}")
-            st.download_button(
-                label="📄 Descargar Sesión en PDF (.pdf)",
-                data=pdf_hist,
-                file_name=f"Historial_{fecha_actual_sesion}_{jornada_actual_sesion}.pdf",
-                mime="application/pdf",
-                key="btn_dl_pdf_hist"
-            )
 
 # -------------------------------------------------------------
 # MÓDULO 4: DASHBOARD SEMESTRAL
