@@ -6,6 +6,7 @@ import json
 import io
 import os
 import tempfile
+import hashlib
 import matplotlib.pyplot as plt
 from datetime import date
 from fpdf import FPDF
@@ -40,19 +41,32 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------
-# BASE DE DATOS Y PERSISTENCIA
+# BASE DE DATOS MULTI-USUARIO CON PRIVACIDAD
 # -------------------------------------------------------------
 def get_db_connection():
     conn = sqlite3.connect("halterofilia.db", timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
 
+def hash_pass(password):
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
+    # Tabla de Usuarios
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            username TEXT PRIMARY KEY,
+            pin_hash TEXT,
+            permitir_compartir INTEGER DEFAULT 0
+        )
+    """)
+    # Tabla de Intentos con Usuario
     c.execute("""
         CREATE TABLE IF NOT EXISTS intentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            usuario TEXT,
             fecha TEXT,
             tipo_sesion TEXT,
             pr_base REAL,
@@ -71,12 +85,18 @@ def init_db():
     """)
     c.execute("PRAGMA table_info(intentos)")
     cols = [col[1] for col in c.fetchall()]
+    if "usuario" not in cols:
+        try:
+            c.execute("ALTER TABLE intentos ADD COLUMN usuario TEXT DEFAULT 'general'")
+        except Exception:
+            pass
     if "jornada" not in cols:
         try:
             c.execute("ALTER TABLE intentos ADD COLUMN jornada TEXT DEFAULT 'Sesión 1'")
         except Exception:
             pass
 
+    # Tabla de borradores aislada por usuario
     c.execute("""
         CREATE TABLE IF NOT EXISTS estado_borrador (
             clave TEXT PRIMARY KEY,
@@ -88,17 +108,19 @@ def init_db():
 
 init_db()
 
-def guardar_estado_disco(clave, valor_obj):
+def guardar_estado_disco(usuario, clave, valor_obj):
+    clave_compuesta = f"{usuario}_{clave}"
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO estado_borrador (clave, valor) VALUES (?, ?)", (clave, json.dumps(valor_obj)))
+    c.execute("INSERT OR REPLACE INTO estado_borrador (clave, valor) VALUES (?, ?)", (clave_compuesta, json.dumps(valor_obj)))
     conn.commit()
     conn.close()
 
-def cargar_estado_disco(clave, valor_defecto):
+def cargar_estado_disco(usuario, clave, valor_defecto):
+    clave_compuesta = f"{usuario}_{clave}"
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT valor FROM estado_borrador WHERE clave = ?", (clave,))
+    c.execute("SELECT valor FROM estado_borrador WHERE clave = ?", (clave_compuesta,))
     fila = c.fetchone()
     conn.close()
     if fila and fila["valor"]:
@@ -109,7 +131,85 @@ def cargar_estado_disco(clave, valor_defecto):
     return valor_defecto
 
 # -------------------------------------------------------------
-# PROCESADOR DE EXCEL PARA IMPORTACIÓN
+# AUTENTICACIÓN Y SESIÓN DEL ATLETA
+# -------------------------------------------------------------
+if "usuario_activo" not in st.session_state:
+    st.session_state["usuario_activo"] = None
+
+st.sidebar.title("🏋️‍♂️ Halterofilia Tracker")
+
+if not st.session_state["usuario_activo"]:
+    st.sidebar.subheader("🔒 Ingreso de Atleta")
+    tab_login, tab_reg = st.sidebar.tabs(["Iniciar Sesión", "Registrarse"])
+    
+    with tab_login:
+        l_user = st.text_input("Usuario / Nombre:", key="l_u").strip().lower()
+        l_pin = st.text_input("PIN o Contraseña:", type="password", key="l_p")
+        if st.button("🔑 Entrar", key="btn_login"):
+            if l_user and l_pin:
+                conn = get_db_connection()
+                c = conn.cursor()
+                c.execute("SELECT * FROM usuarios WHERE username = ? AND pin_hash = ?", (l_user, hash_pass(l_pin)))
+                user_match = c.fetchone()
+                conn.close()
+                if user_match:
+                    st.session_state["usuario_activo"] = l_user
+                    st.rerun()
+                else:
+                    st.sidebar.error("Usuario o PIN incorrecto.")
+            else:
+                st.sidebar.warning("Completa usuario y PIN.")
+                
+    with tab_reg:
+        r_user = st.text_input("Nuevo Usuario:", key="r_u").strip().lower()
+        r_pin = st.text_input("Crea un PIN (ej: 1234):", type="password", key="r_p")
+        if st.button("📝 Crear Cuenta", key="btn_reg"):
+            if r_user and r_pin:
+                conn = get_db_connection()
+                c = conn.cursor()
+                try:
+                    c.execute("INSERT INTO usuarios (username, pin_hash, permitir_compartir) VALUES (?, ?, 0)", (r_user, hash_pass(r_pin)))
+                    conn.commit()
+                    st.session_state["usuario_activo"] = r_user
+                    conn.close()
+                    st.sidebar.success("¡Cuenta creada con éxito!")
+                    st.rerun()
+                except sqlite3.IntegrityError:
+                    st.sidebar.error("Ese nombre de usuario ya existe.")
+                conn.close()
+            else:
+                st.sidebar.warning("Ingresa usuario y PIN.")
+
+    st.info("👈 Inicia sesión o crea una cuenta en la barra lateral para acceder a tus entrenamientos privados.")
+    st.stop()
+
+# -------------------------------------------------------------
+# ATLETA LOGUEADO Y PRIVACIDAD
+# -------------------------------------------------------------
+usuario_actual = st.session_state["usuario_activo"]
+st.sidebar.success(f"Atleta: **{usuario_actual.upper()}**")
+
+# Ajuste de Compartir Progreso
+conn = get_db_connection()
+c = conn.cursor()
+c.execute("SELECT permitir_compartir FROM usuarios WHERE username = ?", (usuario_actual,))
+row_user = c.fetchone()
+permite_compartir = bool(row_user["permitir_compartir"]) if row_user else False
+
+with st.sidebar.expander("🛡️ Privacidad de mi Rendimiento"):
+    nuevo_permiso = st.checkbox("Permitir que otros vean mi progreso", value=permite_compartir)
+    if nuevo_permiso != permite_compartir:
+        c.execute("UPDATE usuarios SET permitir_compartir = ? WHERE username = ?", (1 if nuevo_permiso else 0, usuario_actual))
+        conn.commit()
+        st.rerun()
+conn.close()
+
+if st.sidebar.button("🚪 Cerrar Sesión"):
+    st.session_state["usuario_activo"] = None
+    st.rerun()
+
+# -------------------------------------------------------------
+# FUNCIONES DE EXPORTACIÓN (EXCEL Y PDF)
 # -------------------------------------------------------------
 def generar_plantilla_excel():
     output = io.BytesIO()
@@ -179,10 +279,7 @@ def procesar_excel_importado(archivo_excel):
         })
     return pd.DataFrame(filas_estandarizadas)
 
-# -------------------------------------------------------------
-# EXPORTACIÓN DIARIA Y SEMESTRAL CON GRÁFICAS INCLUIDAS
-# -------------------------------------------------------------
-def generar_dashboard_excel(df, fecha_str, jornada_str):
+def generar_dashboard_excel(df, fecha_str, jornada_str, atleta):
     output = io.BytesIO()
     tot_movs = len(df)
     tot_val = len(df[df["resultado"] == "Completado"])
@@ -191,6 +288,7 @@ def generar_dashboard_excel(df, fecha_str, jornada_str):
     tonelaje = df[df["resultado"] == "Completado"]["peso"].sum() if "peso" in df.columns else 0.0
 
     df_kpis = pd.DataFrame([
+        {"Métrica": "Atleta", "Valor": atleta.upper()},
         {"Métrica": "Fecha", "Valor": fecha_str},
         {"Métrica": "Jornada", "Valor": jornada_str},
         {"Métrica": "Efectividad Técnica (%)", "Valor": f"{pct_efectividad:.1f}%"},
@@ -218,13 +316,13 @@ def generar_dashboard_excel(df, fecha_str, jornada_str):
         
     return output.getvalue()
 
-def generar_dashboard_pdf(df, fecha_str, jornada_str):
+def generar_dashboard_pdf(df, fecha_str, jornada_str, atleta):
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=12)
     pdf.add_page()
     
     pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 8, "DASHBOARD DIARIO DE ENTRENAMIENTO", ln=True, align="C")
+    pdf.cell(0, 8, f"DASHBOARD DIARIO - {atleta.upper()}", ln=True, align="C")
     pdf.set_font("Helvetica", "I", 10)
     pdf.cell(0, 5, f"Fecha: {fecha_str} | Turno: {jornada_str}", ln=True, align="C")
     pdf.ln(4)
@@ -319,14 +417,10 @@ def generar_dashboard_pdf(df, fecha_str, jornada_str):
         return out.encode("latin1")
     return bytes(out)
 
-# -------------------------------------------------------------
-# EXPORTACIONES SEMESTRALES AVANZADAS CON GRÁFICAS REALES
-# -------------------------------------------------------------
-def generar_semestral_excel(df_all):
+def generar_semestral_excel(df_all, atleta):
     output = io.BytesIO()
     df_all["is_comp"] = df_all["resultado"] == "Completado"
     
-    # 1. Resumen Diario Consolidado
     df_diario = df_all.groupby(["fecha", "jornada"]).agg(
         Total_Movs=("id", "count"),
         Validos=("is_comp", "sum"),
@@ -335,17 +429,14 @@ def generar_semestral_excel(df_all):
     df_diario["Fallas"] = df_diario["Total_Movs"] - df_diario["Validos"]
     df_diario["% Efectividad"] = (df_diario["Validos"] / df_diario["Total_Movs"] * 100).round(1)
 
-    # 2. Datos Gráfica Comparativa: Arranque vs Envión
     df_comp_grafica = df_all.groupby(["fecha", "tipo_sesion"]).agg(
         Total=("id", "count"),
         Validos=("is_comp", "sum")
     ).reset_index()
     df_comp_grafica["% Efectividad"] = (df_comp_grafica["Validos"] / df_comp_grafica["Total"] * 100).round(1)
 
-    # 3. Datos Gráfica: Tonelaje Diario
     df_ton_grafica = df_all[df_all["is_comp"]].groupby("fecha")["peso"].sum().reset_index().rename(columns={"peso": "Tonelaje_Total_Kg"})
 
-    # 4. Rendimiento por Ejercicio
     df_ejercicios = df_all.groupby("movimiento").agg(
         Total_Intentos=("id", "count"),
         Validos=("is_comp", "sum"),
@@ -355,7 +446,6 @@ def generar_semestral_excel(df_all):
     df_ejercicios["% Éxito"] = (df_ejercicios["Validos"] / df_ejercicios["Total_Intentos"] * 100).round(1)
     df_ejercicios["Prom_Kg"] = df_ejercicios["Prom_Kg"].round(1)
 
-    # 5. KPIs Globales
     tot_movs = len(df_all)
     tot_val = int(df_all["is_comp"].sum())
     tot_fal = tot_movs - tot_val
@@ -363,6 +453,7 @@ def generar_semestral_excel(df_all):
     tonelaje_global = df_all[df_all["is_comp"]]["peso"].sum()
 
     df_kpi_sem = pd.DataFrame([
+        {"Métrica": "Atleta", "Valor": atleta.upper()},
         {"Métrica": "Período", "Valor": "Histórico Semestral"},
         {"Métrica": "Total Sesiones Registradas", "Valor": len(df_diario)},
         {"Métrica": "Efectividad Global (%)", "Valor": f"{pct_global:.1f}%"},
@@ -382,13 +473,13 @@ def generar_semestral_excel(df_all):
         
     return output.getvalue()
 
-def generar_semestral_pdf(df_all):
+def generar_semestral_pdf(df_all, atleta):
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=12)
     pdf.add_page()
     
     pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 8, "DASHBOARD SEMESTRAL DE HALTEROFILIA", ln=True, align="C")
+    pdf.cell(0, 8, f"DASHBOARD SEMESTRAL - {atleta.upper()}", ln=True, align="C")
     pdf.set_font("Helvetica", "I", 10)
     pdf.cell(0, 5, "Reporte Completo: Resumen Diario y Gráficas de Rendimiento", ln=True, align="C")
     pdf.ln(4)
@@ -400,7 +491,6 @@ def generar_semestral_pdf(df_all):
     pct_global = (tot_val / tot_movs * 100) if tot_movs > 0 else 0
     tonelaje_global = df_all[df_all["is_comp"]]["peso"].sum()
 
-    # 1. KPIs Globales
     pdf.set_font("Helvetica", "B", 10)
     pdf.cell(0, 6, "1. RESUMEN GLOBAL ACUMULADO", ln=True)
     pdf.set_font("Helvetica", "", 9)
@@ -420,7 +510,6 @@ def generar_semestral_pdf(df_all):
     pdf.cell(ancho_kpi, 8, f"{tonelaje_global:.1f} kg", border=1, align="C")
     pdf.ln(8)
 
-    # 2. Resumen Diario Consolidado
     pdf.set_font("Helvetica", "B", 10)
     pdf.cell(0, 6, "2. RESUMEN DIARIO CONSOLIDADO", ln=True)
     
@@ -455,12 +544,10 @@ def generar_semestral_pdf(df_all):
 
     pdf.ln(6)
 
-    # 3. Renderizar y Estampar las Gráficas Visuales en el PDF
     pdf.set_font("Helvetica", "B", 10)
     pdf.cell(0, 6, "3. GRÁFICAS COMPARATIVAS DE RENDIMIENTO", ln=True)
     pdf.ln(2)
 
-    # Generar Gráfica 1 en Matplotlib: Evolución Técnica Arranque vs Envión
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
     
     df_progreso = df_all.groupby(["fecha", "tipo_sesion"]).agg(
@@ -479,7 +566,6 @@ def generar_semestral_pdf(df_all):
     ax1.tick_params(axis='x', rotation=45, labelsize=8)
     ax1.legend(fontsize=8)
 
-    # Generar Gráfica 2 en Matplotlib: Tonelaje Diario
     df_tonelaje_dia = df_all[df_all["is_comp"]].groupby("fecha")["peso"].sum().reset_index()
     ax2.bar(df_tonelaje_dia["fecha"], df_tonelaje_dia["peso"], color="#2E7D32", alpha=0.85)
     ax2.set_title("Tonelaje Total Válido por Día (kg)", fontsize=10, fontweight="bold")
@@ -489,7 +575,6 @@ def generar_semestral_pdf(df_all):
 
     plt.tight_layout()
 
-    # Guardar imagen temporal para incrustar en PDF
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_img:
         plt.savefig(tmp_img.name, format="png", dpi=200)
         plt.close(fig)
@@ -503,7 +588,6 @@ def generar_semestral_pdf(df_all):
         except Exception:
             pass
 
-    # 4. Rendimiento por Ejercicio
     pdf.set_font("Helvetica", "B", 10)
     pdf.cell(0, 6, "4. RENDIMIENTO ACUMULADO POR EJERCICIO", ln=True)
     pdf.set_font("Helvetica", "B", 8)
@@ -589,7 +673,7 @@ def generar_pdf_simple(df, titulo="Reporte de Entrenamiento", subtitulo=""):
     return bytes(out)
 
 # -------------------------------------------------------------
-# MEMORIA Y ESTADOS DE SESIÓN
+# MEMORIA Y ESTADOS DE SESIÓN (POR USUARIO)
 # -------------------------------------------------------------
 if "lista_bloques" not in st.session_state:
     bloques_defecto = [
@@ -599,30 +683,30 @@ if "lista_bloques" not in st.session_state:
         {"Tipo": "Arranque", "Complejo / Ejercicios": "Jalón Arranque c/p rodilla + Arranque c/p rodilla + Clásico", "Series": 4, "Reps": 1, "% 1RM": 80},
         {"Tipo": "Arranque", "Complejo / Ejercicios": "Jalón c/p + Clásico", "Series": 2, "Reps": 1, "% 1RM": 85},
     ]
-    st.session_state["lista_bloques"] = cargar_estado_disco("lista_bloques", bloques_defecto)
+    st.session_state["lista_bloques"] = cargar_estado_disco(usuario_actual, "lista_bloques", bloques_defecto)
 
 if "matriz_activa" not in st.session_state:
-    matriz_guardada = cargar_estado_disco("matriz_activa", [])
+    matriz_guardada = cargar_estado_disco(usuario_actual, "matriz_activa", [])
     st.session_state["matriz_activa"] = pd.DataFrame(matriz_guardada)
 
 if "menu_nav" not in st.session_state:
     st.session_state["menu_nav"] = "⚙️ 1. Esquema y PRs"
 
 # -------------------------------------------------------------
-# BARRA LATERAL
+# NAVEGACIÓN
 # -------------------------------------------------------------
-st.sidebar.title("🏋️‍♂️ Navegación")
 opciones_menu = [
     "⚙️ 1. Esquema y PRs", 
     "🏋️‍♂️ 2. Registro en Vivo", 
     "🔍 Detalle Diario", 
-    "📊 Dashboard Semestral"
+    "📊 Dashboard Semestral",
+    "👥 Ver Otros Atletas"
 ]
 
 menu = st.sidebar.radio(
     "Ir a:", 
     opciones_menu, 
-    index=opciones_menu.index(st.session_state["menu_nav"]),
+    index=opciones_menu.index(st.session_state["menu_nav"]) if st.session_state["menu_nav"] in opciones_menu else 0,
     key="menu_radio"
 )
 st.session_state["menu_nav"] = menu
@@ -633,22 +717,22 @@ st.session_state["menu_nav"] = menu
 if menu == "⚙️ 1. Esquema y PRs":
     st.title("⚙️ Configuración del Entrenamiento")
     
-    val_pr_arr = float(cargar_estado_disco("pr_arr", 70.0))
-    val_pr_env = float(cargar_estado_disco("pr_env", 90.0))
+    val_pr_arr = float(cargar_estado_disco(usuario_actual, "pr_arr", 70.0))
+    val_pr_env = float(cargar_estado_disco(usuario_actual, "pr_env", 90.0))
     
     c1, c2, c3 = st.columns([1.2, 1.2, 1.2])
     with c1:
         st.session_state["cfg_fecha"] = st.date_input("Fecha de Sesión", date.today())
         pr_arr_in = st.number_input("PR Arranque (kg)", min_value=1.0, value=val_pr_arr, step=1.0)
         if pr_arr_in != val_pr_arr:
-            guardar_estado_disco("pr_arr", pr_arr_in)
+            guardar_estado_disco(usuario_actual, "pr_arr", pr_arr_in)
         st.session_state["cfg_pr_arr"] = pr_arr_in
 
     with c2:
         st.session_state["cfg_jornada"] = st.selectbox("Sesión / Turno", ["Sesión 1 (Mañana)", "Sesión 2 (Tarde)", "Sesión 3 (Extra)"], index=0)
         pr_env_in = st.number_input("PR Envión (kg)", min_value=1.0, value=val_pr_env, step=1.0)
         if pr_env_in != val_pr_env:
-            guardar_estado_disco("pr_env", pr_env_in)
+            guardar_estado_disco(usuario_actual, "pr_env", pr_env_in)
         st.session_state["cfg_pr_env"] = pr_env_in
 
     with c3:
@@ -680,7 +764,7 @@ if menu == "⚙️ 1. Esquema y PRs":
                 with col_btn_in1:
                     if st.button("⚡ Cargar a la Matriz Activa para Entrenar", type="primary"):
                         st.session_state["matriz_activa"] = df_excel_procesado
-                        guardar_estado_disco("matriz_activa", df_excel_procesado.to_dict(orient="records"))
+                        guardar_estado_disco(usuario_actual, "matriz_activa", df_excel_procesado.to_dict(orient="records"))
                         st.success("¡Planilla cargada en la matriz activa!")
                         st.session_state["menu_nav"] = "🏋️‍♂️ 2. Registro en Vivo"
                         st.rerun()
@@ -691,8 +775,8 @@ if menu == "⚙️ 1. Esquema y PRs":
                         c = conn.cursor()
                         f_imp = str(st.session_state.get("cfg_fecha", date.today()))
                         j_imp = str(st.session_state.get("cfg_jornada", "Sesión 1"))
-                        pr_arr_g = float(cargar_estado_disco("pr_arr", 70.0))
-                        pr_env_g = float(cargar_estado_disco("pr_env", 90.0))
+                        pr_arr_g = float(cargar_estado_disco(usuario_actual, "pr_arr", 70.0))
+                        pr_env_g = float(cargar_estado_disco(usuario_actual, "pr_env", 90.0))
                         
                         for _, r in df_excel_procesado.iterrows():
                             valido = bool(r["Válido (✔)"])
@@ -702,10 +786,10 @@ if menu == "⚙️ 1. Esquema y PRs":
                             obs = str(r["Observación Técnica"])
                             
                             c.execute("""
-                                INSERT INTO intentos (fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                INSERT INTO intentos (usuario, fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """, (
-                                f_imp, tipo_actual, float(pr_base), str(r.get("Movimiento", "")),
+                                usuario_actual, f_imp, tipo_actual, float(pr_base), str(r.get("Movimiento", "")),
                                 str(r.get("Serie", "S1")), str(r.get("Rep", "Rep 1")), str(r.get("Movimiento", "")),
                                 float(str(r.get("% 1RM", "70")).replace("%", "") if str(r.get("% 1RM", "70")).replace("%", "").isdigit() else 70.0),
                                 float(r.get("Carga (kg)", 0.0)), res, obs, j_imp
@@ -744,7 +828,7 @@ if menu == "⚙️ 1. Esquema y PRs":
                     "Reps": int(f_reps),
                     "% 1RM": float(f_pct)
                 })
-                guardar_estado_disco("lista_bloques", st.session_state["lista_bloques"])
+                guardar_estado_disco(usuario_actual, "lista_bloques", st.session_state["lista_bloques"])
                 st.success(f"¡Agregado: {f_ejercicio}!")
                 st.rerun()
             else:
@@ -775,19 +859,19 @@ if menu == "⚙️ 1. Esquema y PRs":
         )
         
         st.session_state["lista_bloques"] = bloques_editados.to_dict(orient="records")
-        guardar_estado_disco("lista_bloques", st.session_state["lista_bloques"])
+        guardar_estado_disco(usuario_actual, "lista_bloques", st.session_state["lista_bloques"])
 
         col_b1, col_b2 = st.columns(2)
         with col_b1:
             if st.button("🗑️ Borrar Último Bloque"):
                 if st.session_state["lista_bloques"]:
                     st.session_state["lista_bloques"].pop()
-                    guardar_estado_disco("lista_bloques", st.session_state["lista_bloques"])
+                    guardar_estado_disco(usuario_actual, "lista_bloques", st.session_state["lista_bloques"])
                     st.rerun()
         with col_b2:
             if st.button("🧹 Limpiar Todo el Esquema"):
                 st.session_state["lista_bloques"] = []
-                guardar_estado_disco("lista_bloques", [])
+                guardar_estado_disco(usuario_actual, "lista_bloques", [])
                 st.rerun()
 
         st.write("")
@@ -821,7 +905,7 @@ if menu == "⚙️ 1. Esquema y PRs":
                                 "Observación Técnica": ""
                             })
             st.session_state["matriz_activa"] = pd.DataFrame(filas)
-            guardar_estado_disco("matriz_activa", filas)
+            guardar_estado_disco(usuario_actual, "matriz_activa", filas)
             st.session_state["menu_nav"] = "🏋️‍♂️ 2. Registro en Vivo"
             st.rerun()
 
@@ -863,7 +947,7 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
                             })
                 df_nuevas = pd.DataFrame(nuevas_filas)
                 st.session_state["matriz_activa"] = pd.concat([st.session_state["matriz_activa"], df_nuevas], ignore_index=True)
-                guardar_estado_disco("matriz_activa", st.session_state["matriz_activa"].to_dict(orient="records"))
+                guardar_estado_disco(usuario_actual, "matriz_activa", st.session_state["matriz_activa"].to_dict(orient="records"))
                 st.success(f"¡Se agregaron {len(nuevas_filas)} intentos extra al final de tu tabla!")
                 st.rerun()
             else:
@@ -893,7 +977,7 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
         )
         
         st.session_state["matriz_activa"] = matriz_final
-        guardar_estado_disco("matriz_activa", matriz_final.to_dict(orient="records"))
+        guardar_estado_disco(usuario_actual, "matriz_activa", matriz_final.to_dict(orient="records"))
 
         st.write("---")
         st.write("**Exportar Planilla de Entrenamiento:**")
@@ -926,8 +1010,8 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
         if st.button("💾 Guardar Entrenamiento Completo", type="primary"):
             conn = get_db_connection()
             c = conn.cursor()
-            pr_arr_g = float(cargar_estado_disco("pr_arr", 70.0))
-            pr_env_g = float(cargar_estado_disco("pr_env", 90.0))
+            pr_arr_g = float(cargar_estado_disco(usuario_actual, "pr_arr", 70.0))
+            pr_env_g = float(cargar_estado_disco(usuario_actual, "pr_env", 90.0))
 
             for _, r in matriz_final.iterrows():
                 valido = bool(r["Válido (✔)"]) if pd.notna(r["Válido (✔)"]) else False
@@ -937,10 +1021,10 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
                 obs = str(r["Observación Técnica"]) if pd.notna(r["Observación Técnica"]) else ""
                 
                 c.execute("""
-                    INSERT INTO intentos (fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO intentos (usuario, fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    fecha_act, tipo_actual, float(pr_base), str(r.get("Bloque", "")),
+                    usuario_actual, fecha_act, tipo_actual, float(pr_base), str(r.get("Bloque", "")),
                     str(r.get("Serie", "S1")), str(r.get("Rep", "Rep 1")), str(r.get("Movimiento", "")),
                     float(str(r.get("% 1RM", "70")).replace("%", "") if str(r.get("% 1RM", "70")).replace("%", "").isdigit() else 70.0),
                     float(r.get("Carga (kg)", 0.0)), res, obs, jornada_act
@@ -949,7 +1033,7 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
             conn.close()
             
             st.session_state["matriz_activa"] = pd.DataFrame()
-            guardar_estado_disco("matriz_activa", [])
+            guardar_estado_disco(usuario_actual, "matriz_activa", [])
             st.success(f"✅ ¡Entrenamiento guardado ({jornada_act}) con éxito!")
             st.session_state["menu_nav"] = "🔍 Detalle Diario"
             st.rerun()
@@ -960,7 +1044,7 @@ elif menu == "🏋️‍♂️ 2. Registro en Vivo":
 elif menu == "🔍 Detalle Diario":
     st.title("📋 Gestión y Edición de Entrenamientos")
     conn = get_db_connection()
-    df_raw = pd.read_sql_query("SELECT * FROM intentos", conn)
+    df_raw = pd.read_sql_query("SELECT * FROM intentos WHERE usuario = ?", conn, params=(usuario_actual,))
     conn.close()
 
     if df_raw.empty:
@@ -994,7 +1078,7 @@ elif menu == "🔍 Detalle Diario":
         
         col_dash1, col_dash2 = st.columns(2)
         with col_dash1:
-            bytes_dash_excel = generar_dashboard_excel(df_sesion, fecha_actual_sesion, jornada_actual_sesion)
+            bytes_dash_excel = generar_dashboard_excel(df_sesion, fecha_actual_sesion, jornada_actual_sesion, usuario_actual)
             st.download_button(
                 label="📊 Descargar Dashboard en Excel (.xlsx)",
                 data=bytes_dash_excel,
@@ -1004,7 +1088,7 @@ elif menu == "🔍 Detalle Diario":
             )
             
         with col_dash2:
-            bytes_dash_pdf = generar_dashboard_pdf(df_sesion, fecha_actual_sesion, jornada_actual_sesion)
+            bytes_dash_pdf = generar_dashboard_pdf(df_sesion, fecha_actual_sesion, jornada_actual_sesion, usuario_actual)
             st.download_button(
                 label="📑 Descargar Dashboard en PDF (.pdf)",
                 data=bytes_dash_pdf,
@@ -1028,10 +1112,10 @@ elif menu == "🔍 Detalle Diario":
                     c = conn.cursor()
                     for _, fila_cp in df_sesion.iterrows():
                         c.execute("""
-                            INSERT INTO intentos (fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            INSERT INTO intentos (usuario, fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
-                            str(fecha_copia_dest), fila_cp["tipo_sesion"], fila_cp["pr_base"], fila_cp["bloque_combo"],
+                            usuario_actual, str(fecha_copia_dest), fila_cp["tipo_sesion"], fila_cp["pr_base"], fila_cp["bloque_combo"],
                             fila_cp["serie"], fila_cp["repeticion"], fila_cp["movimiento"], fila_cp["pct_pr"],
                             fila_cp["peso"], fila_cp["resultado"], fila_cp["observacion"], jornada_copia_dest
                         ))
@@ -1059,8 +1143,8 @@ elif menu == "🔍 Detalle Diario":
                     c.execute("""
                         UPDATE intentos 
                         SET fecha = ?, jornada = ? 
-                        WHERE id = ?
-                    """, (str(fecha_destino), jornada_destino, int(id_a_mover)))
+                        WHERE id = ? AND usuario = ?
+                    """, (str(fecha_destino), jornada_destino, int(id_a_mover), usuario_actual))
                     conn.commit()
                     conn.close()
                     st.success("¡Ejercicio transferido exitosamente!")
@@ -1076,8 +1160,8 @@ elif menu == "🔍 Detalle Diario":
                     if st.button("➕ Anexar estos datos a la Sesión Actual"):
                         conn = get_db_connection()
                         c = conn.cursor()
-                        pr_arr_g = float(cargar_estado_disco("pr_arr", 70.0))
-                        pr_env_g = float(cargar_estado_disco("pr_env", 90.0))
+                        pr_arr_g = float(cargar_estado_disco(usuario_actual, "pr_arr", 70.0))
+                        pr_env_g = float(cargar_estado_disco(usuario_actual, "pr_env", 90.0))
                         
                         for _, r in df_imp_hist.iterrows():
                             valido = bool(r["Válido (✔)"])
@@ -1086,10 +1170,10 @@ elif menu == "🔍 Detalle Diario":
                             pr_base = pr_arr_g if tipo_actual == "Arranque" else pr_env_g
                             obs = str(r["Observación Técnica"])
                             c.execute("""
-                                INSERT INTO intentos (fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                INSERT INTO intentos (usuario, fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """, (
-                                fecha_actual_sesion, tipo_actual, float(pr_base), str(r.get("Movimiento", "")),
+                                usuario_actual, fecha_actual_sesion, tipo_actual, float(pr_base), str(r.get("Movimiento", "")),
                                 str(r.get("Serie", "S1")), str(r.get("Rep", "Rep 1")), str(r.get("Movimiento", "")),
                                 float(str(r.get("% 1RM", "70")).replace("%", "") if str(r.get("% 1RM", "70")).replace("%", "").isdigit() else 70.0),
                                 float(r.get("Carga (kg)", 0.0)), res, obs, jornada_actual_sesion
@@ -1109,8 +1193,8 @@ elif menu == "🔍 Detalle Diario":
                 c.execute("""
                     UPDATE intentos 
                     SET fecha = ? 
-                    WHERE fecha = ? AND jornada = ?
-                """, (str(nueva_fecha_glob), fecha_actual_sesion, jornada_actual_sesion))
+                    WHERE fecha = ? AND jornada = ? AND usuario = ?
+                """, (str(nueva_fecha_glob), fecha_actual_sesion, jornada_actual_sesion, usuario_actual))
                 conn.commit()
                 conn.close()
                 st.success(f"Sesión transferida al {nueva_fecha_glob}")
@@ -1140,12 +1224,12 @@ elif menu == "🔍 Detalle Diario":
                         res_retro = "Completado" if r_valido else "Falla"
                         conn = get_db_connection()
                         c = conn.cursor()
-                        pr_calc = float(cargar_estado_disco("pr_arr", 70.0)) if r_tipo == "Arranque" else float(cargar_estado_disco("pr_env", 90.0))
+                        pr_calc = float(cargar_estado_disco(usuario_actual, "pr_arr", 70.0)) if r_tipo == "Arranque" else float(cargar_estado_disco(usuario_actual, "pr_env", 90.0))
                         c.execute("""
-                            INSERT INTO intentos (fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            INSERT INTO intentos (usuario, fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
-                            fecha_actual_sesion, r_tipo, pr_calc, r_mov.strip(),
+                            usuario_actual, fecha_actual_sesion, r_tipo, pr_calc, r_mov.strip(),
                             r_serie, r_rep, r_mov.strip(), float(r_pct), float(r_peso),
                             res_retro, r_obs, jornada_actual_sesion
                         ))
@@ -1191,7 +1275,7 @@ elif menu == "🔍 Detalle Diario":
                 ids_a_borrar = ids_anteriores - ids_actuales
                 
                 for id_borrar in ids_a_borrar:
-                    c.execute("DELETE FROM intentos WHERE id = ?", (int(id_borrar),))
+                    c.execute("DELETE FROM intentos WHERE id = ? AND usuario = ?", (int(id_borrar), usuario_actual))
 
                 for _, r in df_editado.iterrows():
                     res = "Completado" if bool(r["Válido (✔)"]) else "Falla"
@@ -1208,14 +1292,14 @@ elif menu == "🔍 Detalle Diario":
                             UPDATE intentos 
                             SET tipo_sesion = ?, serie = ?, repeticion = ?, movimiento = ?, 
                                 pct_pr = ?, peso = ?, resultado = ?, observacion = ?
-                            WHERE id = ?
-                        """, (tipo_u, serie_u, rep_u, mov_u, pct_u, peso_u, res, obs, int(r["id"])))
+                            WHERE id = ? AND usuario = ?
+                        """, (tipo_u, serie_u, rep_u, mov_u, pct_u, peso_u, res, obs, int(r["id"]), usuario_actual))
                     else:
-                        pr_calc = float(cargar_estado_disco("pr_arr", 70.0)) if tipo_u == "Arranque" else float(cargar_estado_disco("pr_env", 90.0))
+                        pr_calc = float(cargar_estado_disco(usuario_actual, "pr_arr", 70.0)) if tipo_u == "Arranque" else float(cargar_estado_disco(usuario_actual, "pr_env", 90.0))
                         c.execute("""
-                            INSERT INTO intentos (fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (fecha_actual_sesion, tipo_u, pr_calc, mov_u, serie_u, rep_u, mov_u, pct_u, peso_u, res, obs, jornada_actual_sesion))
+                            INSERT INTO intentos (usuario, fecha, tipo_sesion, pr_base, bloque_combo, serie, repeticion, movimiento, pct_pr, peso, resultado, observacion, jornada)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (usuario_actual, fecha_actual_sesion, tipo_u, pr_calc, mov_u, serie_u, rep_u, mov_u, pct_u, peso_u, res, obs, jornada_actual_sesion))
                 
                 conn.commit()
                 conn.close()
@@ -1226,19 +1310,19 @@ elif menu == "🔍 Detalle Diario":
             if st.button("🗑️ Eliminar Esta Sesión Completa"):
                 conn = get_db_connection()
                 c = conn.cursor()
-                c.execute("DELETE FROM intentos WHERE fecha = ? AND jornada = ?", (fecha_actual_sesion, jornada_actual_sesion))
+                c.execute("DELETE FROM intentos WHERE fecha = ? AND jornada = ? AND usuario = ?", (fecha_actual_sesion, jornada_actual_sesion, usuario_actual))
                 conn.commit()
                 conn.close()
                 st.warning(f"Sesión {fecha_actual_sesion} ({jornada_actual_sesion}) eliminada.")
                 st.rerun()
 
 # -------------------------------------------------------------
-# MÓDULO 4: DASHBOARD SEMESTRAL (GRÁFICAS COMPARATIVAS Y DESCARGAS)
+# MÓDULO 4: DASHBOARD SEMESTRAL (GRÁFICAS Y DESCARGAS)
 # -------------------------------------------------------------
 elif menu == "📊 Dashboard Semestral":
-    st.title("📈 Dashboard Semestral y Progresión")
+    st.title(f"📈 Dashboard Semestral - {usuario_actual.upper()}")
     conn = get_db_connection()
-    df_all = pd.read_sql_query("SELECT * FROM intentos", conn)
+    df_all = pd.read_sql_query("SELECT * FROM intentos WHERE usuario = ?", conn, params=(usuario_actual,))
     conn.close()
 
     if df_all.empty:
@@ -1265,21 +1349,21 @@ elif menu == "📊 Dashboard Semestral":
         
         col_dl_sem1, col_dl_sem2 = st.columns(2)
         with col_dl_sem1:
-            bytes_sem_excel = generar_semestral_excel(df_all)
+            bytes_sem_excel = generar_semestral_excel(df_all, usuario_actual)
             st.download_button(
                 label="📊 Descargar Dashboard Semestral en Excel (.xlsx)",
                 data=bytes_sem_excel,
-                file_name="Dashboard_Semestral_Halterofilia.xlsx",
+                file_name=f"Dashboard_Semestral_{usuario_actual}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="btn_dl_sem_excel"
             )
             
         with col_dl_sem2:
-            bytes_sem_pdf = generar_semestral_pdf(df_all)
+            bytes_sem_pdf = generar_semestral_pdf(df_all, usuario_actual)
             st.download_button(
                 label="📑 Descargar Dashboard Semestral en PDF (.pdf)",
                 data=bytes_sem_pdf,
-                file_name="Dashboard_Semestral_Halterofilia.pdf",
+                file_name=f"Dashboard_Semestral_{usuario_actual}.pdf",
                 mime="application/pdf",
                 key="btn_dl_sem_pdf"
             )
@@ -1287,7 +1371,6 @@ elif menu == "📊 Dashboard Semestral":
         st.write("---")
         st.subheader("📈 Gráficas Comparativas")
 
-        # Gráfica 1: Curva de Efectividad Diaria (Arranque vs Envión)
         df_progreso = df_all.groupby(["fecha", "tipo_sesion"]).agg(
             Válidos=("is_comp", "sum"),
             Total=("id", "count")
@@ -1306,7 +1389,6 @@ elif menu == "📊 Dashboard Semestral":
         fig_line.update_yaxes(range=[0, 105])
         st.plotly_chart(fig_line, use_container_width=True)
 
-        # Gráfica 2: Tonelaje Total Acumulado por Día
         df_tonelaje_dia = df_all[df_all["is_comp"]].groupby("fecha")["peso"].sum().reset_index()
         fig_bar = px.bar(
             df_tonelaje_dia,
@@ -1337,3 +1419,55 @@ elif menu == "📊 Dashboard Semestral":
             }),
             use_container_width=True
         )
+
+# -------------------------------------------------------------
+# MÓDULO 5: VER OTROS ATLETAS (SÓLO SI ESTÁN AUTORIZADOS)
+# -------------------------------------------------------------
+elif menu == "👥 Ver Otros Atletas":
+    st.title("👥 Rendimiento de Atletas Autorizados")
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT username FROM usuarios WHERE permitir_compartir = 1 AND username != ?", (usuario_actual,))
+    atletas_compartidos = [r["username"] for r in c.fetchall()]
+    conn.close()
+
+    if not atletas_compartidos:
+        st.info("Ningún otro atleta ha activado la opción 'Permitir que otros vean mi progreso'.")
+    else:
+        atleta_sel = st.selectbox("Selecciona un atleta para ver su dashboard:", atletas_compartidos)
+        conn = get_db_connection()
+        df_otro = pd.read_sql_query("SELECT * FROM intentos WHERE usuario = ?", conn, params=(atleta_sel,))
+        conn.close()
+
+        if df_otro.empty:
+            st.info(f"El atleta {atleta_sel} aún no tiene levantamientos registrados.")
+        else:
+            df_otro["is_comp"] = df_otro["resultado"] == "Completado"
+            tot_o = len(df_otro)
+            val_o = int(df_otro["is_comp"].sum())
+            fal_o = tot_o - val_o
+            pct_o = (val_o / tot_o * 100) if tot_o > 0 else 0
+            ton_o = df_otro[df_otro["is_comp"]]["peso"].sum()
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Efectividad", f"{pct_o:.1f}%")
+            c2.metric("Válidos", val_o)
+            c3.metric("Fallas", fal_o)
+            c4.metric("Tonelaje", f"{ton_o:.1f} kg")
+
+            df_prog_otro = df_otro.groupby(["fecha", "tipo_sesion"]).agg(
+                Válidos=("is_comp", "sum"),
+                Total=("id", "count")
+            ).reset_index()
+            df_prog_otro["% Efectividad"] = (df_prog_otro["Válidos"] / df_prog_otro["Total"]) * 100
+
+            fig_line_o = px.line(
+                df_prog_otro,
+                x="fecha",
+                y="% Efectividad",
+                color="tipo_sesion",
+                markers=True,
+                title=f"Evolución Técnica de {atleta_sel.upper()} (Arranque vs Envión)"
+            )
+            fig_line_o.update_yaxes(range=[0, 105])
+            st.plotly_chart(fig_line_o, use_container_width=True)
