@@ -3,8 +3,9 @@ import pandas as pd
 import sqlite3
 import plotly.express as px
 import json
-import base64
-import requests
+import re
+from PIL import Image
+import pytesseract
 from datetime import date
 
 st.set_page_config(
@@ -97,81 +98,54 @@ def cargar_estado_disco(clave, valor_defecto):
     return valor_defecto
 
 # -------------------------------------------------------------
-# MOTOR DE LECTURA DE PIZARRA (CONEXIÓN REST ROBUSTA)
+# MOTOR DE LECTURA OCR LOCAL (SIN CLAVES NI ERRORES 401)
 # -------------------------------------------------------------
-def procesar_foto_pizarra(image_file, api_key):
-    if not api_key:
-        api_key = "AQ.Ab8RN6J34-hPjlTscx_eYVUIrkZT9Q7Wjzrr1oofSaEwriqZFw"
-
-    image_bytes = image_file.getvalue()
-    b64_image = base64.b64encode(image_bytes).decode("utf-8")
-    mime_type = image_file.type if hasattr(image_file, "type") and image_file.type else "image/jpeg"
-
-    prompt = """
-    Extrae la lista de ejercicios de halterofilia de la imagen.
-    Devuelve ÚNICAMENTE un array JSON válido con esta estructura exacta:
-    [
-      {
-        "Tipo": "Arranque",
-        "Complejo / Ejercicios": "Jalón c/p + Clásico",
-        "Series": 2,
-        "Reps": 1,
-        "% 1RM": 80
-      }
-    ]
-    """
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": api_key
-    }
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": prompt},
-                {"inline_data": {"mime_type": mime_type, "data": b64_image}}
-            ]
-        }]
-    }
+def procesar_foto_ocr(image_file):
+    img = Image.open(image_file)
+    texto = pytesseract.image_to_string(img, lang="spa+eng")
     
-    res = requests.post(url, headers=headers, json=payload, timeout=35)
-    if res.status_code != 200:
-        raise Exception(f"Error de Google ({res.status_code}): {res.text}")
+    lineas = [l.strip() for l in texto.split("\n") if len(l.strip()) > 3]
+    bloques_detectados = []
     
-    data_raw = res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-    if "```json" in data_raw:
-        data_raw = data_raw.split("```json")[1].split("```")[0].strip()
-    elif "```" in data_raw:
-        data_raw = data_raw.split("```")[1].split("```")[0].strip()
+    for linea in lineas:
+        tipo = "Arranque"
+        l_lower = linea.lower()
+        if "envion" in l_lower or "clean" in l_lower or "jerk" in l_lower:
+            tipo = "Envión"
+        elif "sentadilla" in l_lower or "fuerza" in l_lower or "press" in l_lower or "pull" in l_lower:
+            tipo = "Fuerza"
+
+        # Buscar patrones tipo 4x2 @ 80% o 3x1 @ 75
+        series, reps, pct = 2, 1, 75
+        match_sxr = re.search(r"(\d+)\s*[xX*]\s*(\d+)", linea)
+        if match_sxr:
+            series = int(match_sxr.group(1))
+            reps = int(match_sxr.group(2))
+            
+        match_pct = re.search(r"(\d{2,3})\s*%", linea)
+        if match_pct:
+            pct = int(match_pct.group(1))
+            
+        # Limpieza básica del nombre
+        nombre_ej = re.sub(r"\d+\s*[xX*]\s*\d+", "", linea)
+        nombre_ej = re.sub(r"\d{2,3}\s*%", "", nombre_ej)
+        nombre_ej = re.sub(r"[@|#\-_]", " ", nombre_ej).strip()
         
-    data = json.loads(data_raw)
-    
-    # Manejar respuestas envueltas en diccionarios
-    if isinstance(data, dict):
-        for k in data:
-            if isinstance(data[k], list):
-                data = data[k]
-                break
-        if isinstance(data, dict):
-            data = [data]
+        if not nombre_ej:
+            nombre_ej = f"Ejercicio {tipo}"
 
-    resultado_limpio = []
-    for item in data:
-        if isinstance(item, dict):
-            tipo = item.get("Tipo", item.get("tipo", "Arranque"))
-            ejercicio = item.get("Complejo / Ejercicios", item.get("Complejo", item.get("ejercicio", "Ejercicio")))
-            series = int(item.get("Series", item.get("series", 1)))
-            reps = int(item.get("Reps", item.get("reps", item.get("repeticiones", 1))))
-            pct = float(item.get("% 1RM", item.get("pct", item.get("porcentaje", 70))))
-            resultado_limpio.append({
-                "Tipo": tipo if tipo in ["Arranque", "Envión", "Fuerza"] else "Arranque",
-                "Complejo / Ejercicios": str(ejercicio),
-                "Series": series,
-                "Reps": reps,
-                "% 1RM": pct
-            })
-    return resultado_limpio
+        bloques_detectados.append({
+            "Tipo": tipo,
+            "Complejo / Ejercicios": nombre_ej,
+            "Series": series,
+            "Reps": reps,
+            "% 1RM": float(pct)
+        })
+        
+    if not bloques_detectados:
+        raise Exception("No se detectaron bloques legibles. Puedes ingresarlos manualmente abajo.")
+        
+    return bloques_detectados
 
 # -------------------------------------------------------------
 # MEMORIA Y ESTADOS DE SESIÓN
@@ -239,20 +213,18 @@ if menu == "⚙️ 1. Esquema y PRs":
     st.divider()
     st.subheader("📷 Cargar desde Foto de Pizarra (Opcional)")
     foto_pizarra = st.file_uploader("Sube una foto de la pizarra", type=["png", "jpg", "jpeg"])
-    
-    api_key_guardada = st.secrets.get("GEMINI_API_KEY", "")
 
     if foto_pizarra:
         if st.button("🤖 Leer Foto y Rellenar Esquema"):
-            with st.spinner("Analizando la pizarra..."):
+            with st.spinner("Leyendo pizarra con OCR..."):
                 try:
-                    bloques_extraidos = procesar_foto_pizarra(foto_pizarra, api_key_guardada)
+                    bloques_extraidos = procesar_foto_ocr(foto_pizarra)
                     st.session_state["lista_bloques"] = bloques_extraidos
                     guardar_estado_disco("lista_bloques", bloques_extraidos)
-                    st.success("¡Pizarra leída con éxito! Revisa y ajusta los bloques abajo.")
+                    st.success("¡Pizarra leída! Puedes ajustar los bloques abajo.")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Aviso: {e}")
+                    st.warning(f"{e}")
 
     st.divider()
     st.subheader("➕ Agregar Ejercicio o Bloque Manualmente")
